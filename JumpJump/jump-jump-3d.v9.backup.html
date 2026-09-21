@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>跳一跳 3D - Jump Jump</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            overflow: hidden;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            touch-action: none;
+        }
+        
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #ui {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 100;
+        }
+        
+        #score {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 48px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            pointer-events: none;
+        }
+        
+        #combo {
+            position: absolute;
+            top: 90px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 24px;
+            font-weight: bold;
+            color: #FFD700;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        
+        #startScreen, #gameOverScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            pointer-events: all;
+        }
+        
+        #startScreen h1, #gameOverScreen h1 {
+            font-size: 64px;
+            margin-bottom: 20px;
+            text-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        
+        #startScreen p, #gameOverScreen p {
+            font-size: 24px;
+            margin-bottom: 30px;
+            opacity: 0.9;
+        }
+        
+        .button {
+            padding: 15px 40px;
+            font-size: 24px;
+            background: white;
+            color: #667eea;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.2s, box-shadow 0.2s;
+            pointer-events: all;
+        }
+        
+        .button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 8px 30px rgba(255,255,255,0.3);
+        }
+        
+        .button:active {
+            transform: scale(0.95);
+        }
+        
+        #finalScore {
+            font-size: 48px;
+            color: #FFD700;
+            margin: 20px 0;
+            font-weight: bold;
+        }
+        
+        #powerMeter {
+            position: absolute;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            height: 30px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 15px;
+            overflow: hidden;
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+        }
+        
+        #powerFill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #FFD700, #FF5722);
+            width: 0%;
+            transition: width 0.05s linear;
+        }
+        
+        .hidden {
+            display: none !important;
+        }
+        
+        #instructions {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 18px;
+            text-align: center;
+            opacity: 0.8;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui">
+        <div id="score">0</div>
+        <div id="combo"></div>
+        
+        <div id="powerMeter">
+            <div id="powerFill"></div>
+        </div>
+        
+        <div id="instructions">长按屏幕蓄力，松手跳跃<br>跳到中心点可获得连击加分</div>
+        
+        <div id="startScreen">
+            <h1>跳一跳 3D</h1>
+            <p>长按蓄力，精准跳跃</p>
+            <button class="button" onclick="startGame()">开始游戏</button>
+        </div>
+        
+        <div id="gameOverScreen" class="hidden">
+            <h1>游戏结束</h1>
+            <div id="finalScore">0</div>
+            <p>再试一次？</p>
+            <button class="button" onclick="restartGame()">重新开始</button>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Game variables
+        let scene, camera, renderer;
+        let player, platforms = [];
+        let gameState = 'start'; // start, playing, gameover
+        let score = 0, combo = 0;
+        let isCharging = false, chargeStartTime = 0;
+        let currentPlatformIndex = 0;
+        let isJumping = false;
+        let skippedPlatforms = 0; // 跳过的平台数量（用于大跳加分）
+        let trajectoryLine = null; // 抛物线显示
+        const MAX_JUMP_DISTANCE = 6; // 最大跳跃距离（降低到6，更安全）
+        
+        // Platform types with colors and scoring
+        const platformTypes = [
+            { type: 'normal', color: 0x4ECDC4, bonus: 0 },
+            { type: 'normal', color: 0xFF6B6B, bonus: 0 },
+            { type: 'normal', color: 0x95E1D3, bonus: 0 },
+            { type: 'normal', color: 0xF38181, bonus: 0 },
+            { type: 'musicBox', color: 0xFFD93D, bonus: 30, height: 1.5 },
+            { type: 'store', color: 0x6BCB77, bonus: 15, height: 1.2 },
+            { type: 'cube', color: 0xC77DFF, bonus: 10, height: 1 },
+            { type: 'manhole', color: 0x9D84B7, bonus: 5, height: 0.8 }
+        ];
+        
+        // Initialize Three.js
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 10, 50);
+            
+            // Camera
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(5, 8, 12);
+            camera.lookAt(0, 0, 0);
+            
+            // 初始化相机的lookAt目标
+            camera.userData.currentLookAt = new THREE.Vector3(0, 0, 0);
+            
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ 
+                canvas: document.getElementById('gameCanvas'),
+                antialias: true 
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 10, 5);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.camera.left = -20;
+            directionalLight.shadow.camera.right = 20;
+            directionalLight.shadow.camera.top = 20;
+            directionalLight.shadow.camera.bottom = -20;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            scene.add(directionalLight);
+            
+            // Create player
+            createPlayer();
+            
+            // Create initial platforms
+            createInitialPlatforms();
+            
+            // Event listeners
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousedown', onPointerDown);
+            document.addEventListener('mouseup', onPointerUp);
+            document.addEventListener('touchstart', onPointerDown);
+            document.addEventListener('touchend', onPointerUp);
+            
+            // Start animation loop
+            animate();
+        }
+        
+        function createPlayer() {
+            const geometry = new THREE.CylinderGeometry(0.3, 0.4, 1, 8);
+            const material = new THREE.MeshStandardMaterial({ 
+                color: 0x2C3E50,
+                metalness: 0.3,
+                roughness: 0.7
+            });
+            player = new THREE.Mesh(geometry, material);
+            player.castShadow = true;
+            player.position.set(0, 1.5, 0); // 修正初始高度，站在平台顶部
+            scene.add(player);
+            
+            // Player data
+            player.userData = {
+                velocity: new THREE.Vector3(),
+                isOnGround: true,
+                squishAmount: 0, // 蓄力时的压缩量
+                tiltAngle: 0, // 跳跃时的轻微倾斜角度
+                landingTime: 0, // 落地时间（用于阻尼计算）
+                isStabilizing: false, // 是否正在稳定中
+                stabilizingRotation: new THREE.Vector2(0, 0), // Z轴和X轴的摇晃角度
+                centerOfMass: new THREE.Vector3(0, 0, 0), // 相对于平台的重心位置
+                fallRotationVelocity: null // 倾倒时的旋转速度
+            };
+        }
+        
+        function createInitialPlatforms() {
+            // First platform (starting position)
+            createPlatform(0, 0, 1, 1, 0x4ECDC4, 'normal');
+            
+            // Generate next platforms
+            for (let i = 0; i < 5; i++) {
+                generateNextPlatform();
+            }
+        }
+        
+        function createPlatform(x, z, width, depth, color, type) {
+            const height = platformTypes.find(p => p.type === type)?.height || 1;
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const material = new THREE.MeshStandardMaterial({ 
+                color: color,
+                metalness: 0.2,
+                roughness: 0.8
+            });
+            const platform = new THREE.Mesh(geometry, material);
+            platform.position.set(x, height / 2, z);
+            platform.castShadow = true;
+            platform.receiveShadow = true;
+            
+            platform.userData = {
+                type: type,
+                bonus: platformTypes.find(p => p.type === type)?.bonus || 0,
+                scored: false,
+                width: width,
+                depth: depth
+            };
+            
+            scene.add(platform);
+            platforms.push(platform);
+            
+            return platform;
+        }
+        
+        function generateNextPlatform() {
+            const lastPlatform = platforms[platforms.length - 1];
+            
+            // Random direction (forward or right)
+            const direction = Math.random() > 0.5 ? 'forward' : 'right';
+            
+            // 更保守的距离范围：2-5.5单位（确保玩家能轻松跳到）
+            // 考虑到边缘落地会导致失衡，需要留足安全余量
+            const minDistance = 2.0;
+            const maxDistance = 5.5; // 降低最大距离，让游戏更友好
+            const distance = minDistance + Math.random() * (maxDistance - minDistance);
+            
+            // Random size (稍微增大平台，提高容错率)
+            const size = 0.9 + Math.random() * 0.6; // 0.9 to 1.5
+            
+            // Random platform type (90% normal, 10% special)
+            const typeRoll = Math.random();
+            let platformType;
+            if (typeRoll > 0.9 && platforms.length > 3) {
+                // Special platform
+                const specialTypes = platformTypes.filter(p => p.bonus > 0);
+                platformType = specialTypes[Math.floor(Math.random() * specialTypes.length)];
+            } else {
+                // Normal platform
+                const normalTypes = platformTypes.filter(p => p.bonus === 0);
+                platformType = normalTypes[Math.floor(Math.random() * normalTypes.length)];
+            }
+            
+            let newX = lastPlatform.position.x;
+            let newZ = lastPlatform.position.z;
+            
+            if (direction === 'forward') {
+                newZ -= distance;
+            } else {
+                newX += distance;
+            }
+            
+            createPlatform(newX, newZ, size, size, platformType.color, platformType.type);
+        }
+        
+        function onPointerDown(event) {
+            if (gameState !== 'playing' || isJumping || player.userData.isStabilizing) return;
+            
+            event.preventDefault();
+            isCharging = true;
+            chargeStartTime = Date.now();
+            
+            // Show power meter
+            document.getElementById('powerMeter').style.opacity = '1';
+            
+            // 创建抛物线预览
+            createTrajectoryLine();
+        }
+        
+        function onPointerUp(event) {
+            if (gameState !== 'playing' || !isCharging || isJumping || player.userData.isStabilizing) return;
+            
+            event.preventDefault();
+            isCharging = false;
+            
+            // Hide power meter
+            document.getElementById('powerMeter').style.opacity = '0';
+            
+            // 移除抛物线
+            removeTrajectoryLine();
+            
+            // Calculate jump power (max 2 seconds charge)
+            const chargeTime = Math.min((Date.now() - chargeStartTime) / 1000, 2);
+            const jumpPower = chargeTime * 4; // Max distance ~8 units
+            
+            // Perform jump
+            performJump(jumpPower);
+        }
+        
+        function performJump(power) {
+            isJumping = true;
+            player.userData.isOnGround = false;
+            
+            // Calculate jump direction (to next platform)
+            const currentPlatform = platforms[currentPlatformIndex];
+            const nextPlatform = platforms[currentPlatformIndex + 1];
+            
+            if (!nextPlatform) return;
+            
+            const direction = new THREE.Vector3()
+                .subVectors(nextPlatform.position, currentPlatform.position)
+                .normalize();
+            
+            // Set velocity
+            player.userData.velocity.x = direction.x * power;
+            player.userData.velocity.y = 5; // Upward velocity
+            player.userData.velocity.z = direction.z * power;
+            
+            // 跳跃时轻微倾斜，而不是旋转
+            // 根据跳跃方向计算倾斜角度（向前倾斜约15-20度）
+            player.userData.tiltAngle = 0.3; // 约17度的轻微前倾
+        }
+        
+        function createTrajectoryLine() {
+            // 创建抛物线材质（半透明虚线）
+            const material = new THREE.LineDashedMaterial({
+                color: 0xFFFFFF,
+                linewidth: 2,
+                dashSize: 0.2,
+                gapSize: 0.1,
+                transparent: true,
+                opacity: 0.6
+            });
+            
+            const points = [];
+            trajectoryLine = new THREE.Line(new THREE.BufferGeometry(), material);
+            scene.add(trajectoryLine);
+        }
+        
+        function updateTrajectoryLine(chargeTime) {
+            if (!trajectoryLine) return;
+            
+            const currentPlatform = platforms[currentPlatformIndex];
+            const nextPlatform = platforms[currentPlatformIndex + 1];
+            
+            if (!nextPlatform) return;
+            
+            // 计算跳跃参数
+            const jumpPower = chargeTime * 4;
+            const direction = new THREE.Vector3()
+                .subVectors(nextPlatform.position, currentPlatform.position)
+                .normalize();
+            
+            const velocityX = direction.x * jumpPower;
+            const velocityY = 5;
+            const velocityZ = direction.z * jumpPower;
+            
+            // 生成抛物线点
+            const points = [];
+            const steps = 30;
+            const timeStep = 0.05;
+            
+            let posX = player.position.x;
+            let posY = player.position.y;
+            let posZ = player.position.z;
+            let velY = velocityY;
+            
+            for (let i = 0; i < steps; i++) {
+                points.push(new THREE.Vector3(posX, posY, posZ));
+                
+                // 更新位置
+                posX += velocityX * timeStep;
+                posY += velY * timeStep;
+                posZ += velocityZ * timeStep;
+                
+                // 应用重力
+                velY -= 20 * timeStep;
+                
+                // 如果已经低于地面，停止绘制
+                if (posY < 0) break;
+            }
+            
+            // 更新几何体
+            trajectoryLine.geometry.dispose();
+            trajectoryLine.geometry = new THREE.BufferGeometry().setFromPoints(points);
+            trajectoryLine.computeLineDistances(); // 需要计算距离才能显示虚线
+        }
+        
+        function removeTrajectoryLine() {
+            if (trajectoryLine) {
+                scene.remove(trajectoryLine);
+                trajectoryLine.geometry.dispose();
+                trajectoryLine.material.dispose();
+                trajectoryLine = null;
+            }
+        }
+        
+        function updateCharging() {
+            if (!isCharging) return;
+            
+            const chargeTime = Math.min((Date.now() - chargeStartTime) / 1000, 2);
+            const powerPercent = (chargeTime / 2) * 100;
+            document.getElementById('powerFill').style.width = powerPercent + '%';
+            
+            // 更新抛物线
+            updateTrajectoryLine(chargeTime);
+        }
+        
+        function updatePlayer(deltaTime) {
+            if (!player.userData.isOnGround) {
+                // Apply gravity
+                player.userData.velocity.y -= 20 * deltaTime;
+                
+                // Update position
+                player.position.x += player.userData.velocity.x * deltaTime;
+                player.position.y += player.userData.velocity.y * deltaTime;
+                player.position.z += player.userData.velocity.z * deltaTime;
+                
+                // 跳跃时的轻微倾斜动画
+                if (player.userData.velocity.y > 0) {
+                    player.rotation.x = player.userData.tiltAngle;
+                } else {
+                    const fallProgress = Math.min(Math.abs(player.userData.velocity.y) / 10, 1);
+                    player.rotation.x = player.userData.tiltAngle * (1 - fallProgress * 0.5);
+                }
+                
+                // Check landing
+                checkLanding();
+            } else {
+                // 落地后的物理稳定模拟
+                if (player.userData.isStabilizing) {
+                    const timeSinceLanding = (Date.now() - player.userData.landingTime) / 1000;
+                    const stabilizingDuration = 1.2; // 稳定时间1.2秒
+                    
+                    if (timeSinceLanding < stabilizingDuration) {
+                        // 阻尼振荡 - 模拟重心左右前后摇晃
+                        const dampingFactor = Math.exp(-timeSinceLanding * 2.5); // 指数衰减
+                        const oscillationFreq = 6; // 振荡频率（降低频率使摇晃更明显）
+                        const oscillation = Math.sin(timeSinceLanding * oscillationFreq * Math.PI) * dampingFactor;
+                        
+                        // 应用摇晃到旋转（Z轴=左右摇晃，X轴=前后摇晃）
+                        player.rotation.z = player.userData.stabilizingRotation.y * oscillation;
+                        player.rotation.x = player.userData.stabilizingRotation.x * oscillation;
+                        
+                        // 检查是否倾斜过度（失去平衡）
+                        const maxSafeAngle = 0.4; // 最大安全倾斜角度（约23度）
+                        const totalTilt = Math.sqrt(player.rotation.z * player.rotation.z + player.rotation.x * player.rotation.x);
+                        
+                        if (totalTilt > maxSafeAngle) {
+                            // 失去平衡 - 开始倾倒并掉落
+                            player.userData.isOnGround = false;
+                            player.userData.isStabilizing = false;
+                            
+                            // 计算倾倒方向（朝着倾斜的方向）
+                            const fallDirectionX = player.rotation.z * 3;
+                            const fallDirectionZ = player.rotation.x * 3;
+                            player.userData.velocity.set(fallDirectionX, -2, fallDirectionZ);
+                            
+                            // 添加旋转速度，模拟倾倒
+                            player.userData.fallRotationVelocity = new THREE.Vector2(
+                                player.rotation.x * 4,
+                                player.rotation.z * 4
+                            );
+                        }
+                    } else {
+                        // 稳定完成
+                        player.userData.isStabilizing = false;
+                        player.rotation.x = 0;
+                        player.rotation.z = 0;
+                    }
+                } else if (!isCharging) {
+                    // 恢复原状
+                    player.userData.squishAmount *= 0.9;
+                    player.scale.y = 1 - player.userData.squishAmount;
+                    player.scale.x = 1 + player.userData.squishAmount * 0.5;
+                    player.scale.z = 1 + player.userData.squishAmount * 0.5;
+                    
+                    // 确保旋转归零（站立时保持直立）
+                    if (Math.abs(player.rotation.x) > 0.01) {
+                        player.rotation.x *= 0.85;
+                    } else {
+                        player.rotation.x = 0;
+                    }
+                    if (Math.abs(player.rotation.z) > 0.01) {
+                        player.rotation.z *= 0.85;
+                    } else {
+                        player.rotation.z = 0;
+                    }
+                } else {
+                    // 蓄力中
+                    const chargeTime = Math.min((Date.now() - chargeStartTime) / 1000, 2);
+                    const targetSquish = Math.min(chargeTime * 0.15, 0.2);
+                    player.userData.squishAmount += (targetSquish - player.userData.squishAmount) * 10 * deltaTime;
+                    player.scale.y = 1 - player.userData.squishAmount;
+                    player.scale.x = 1 + player.userData.squishAmount * 0.5;
+                    player.scale.z = 1 + player.userData.squishAmount * 0.5;
+                }
+            }
+            
+            // 倾倒后的持续旋转动画
+            if (player.userData.fallRotationVelocity && !player.userData.isOnGround) {
+                player.rotation.x += player.userData.fallRotationVelocity.x * deltaTime;
+                player.rotation.z += player.userData.fallRotationVelocity.y * deltaTime;
+            }
+        }
+        
+        function checkLanding() {
+            if (player.position.y <= -2) {
+                // Fell off - game over
+                gameOver();
+                return;
+            }
+            
+            // 检查所有可能碰撞的平台（包括侧面碰撞）
+            for (let i = currentPlatformIndex + 1; i < platforms.length; i++) {
+                const targetPlatform = platforms[i];
+                const platformHeight = platformTypes.find(p => p.type === targetPlatform.userData.type)?.height || 1;
+                const platformTop = targetPlatform.position.y + platformHeight / 2;
+                const platformBottom = targetPlatform.position.y - platformHeight / 2;
+                
+                const halfWidth = targetPlatform.userData.width / 2;
+                const halfDepth = targetPlatform.userData.depth / 2;
+                
+                const dx = player.position.x - targetPlatform.position.x;
+                const dz = player.position.z - targetPlatform.position.z;
+                
+                // 棋子的碰撞体（简化为圆柱体，半径0.35，高度1）
+                const playerRadius = 0.35;
+                const playerBottom = player.position.y - 0.5;
+                const playerTop = player.position.y + 0.5;
+                
+                // 检查是否与平台的侧面碰撞
+                const inXRange = Math.abs(dx) <= halfWidth + playerRadius;
+                const inZRange = Math.abs(dz) <= halfDepth + playerRadius;
+                const inYRange = playerBottom <= platformTop + 0.1 && playerTop >= platformBottom;
+                
+                if (inXRange && inZRange && inYRange && player.userData.velocity.y <= 0) {
+                    // 检查是否在平台顶部（可以落地）
+                    const isOnTop = Math.abs(dx) <= halfWidth && Math.abs(dz) <= halfDepth && 
+                                    playerBottom <= platformTop + 0.2 && playerBottom >= platformTop - 0.3;
+                    
+                    if (isOnTop) {
+                        // 顶部落地
+                        skippedPlatforms = i - currentPlatformIndex - 1;
+                        
+                        const distanceToEdgeX = halfWidth - Math.abs(dx);
+                        const distanceToEdgeZ = halfDepth - Math.abs(dz);
+                        const minDistanceToEdge = Math.min(distanceToEdgeX, distanceToEdgeZ);
+                        const edgeThreshold = 0.25; // 放宽边缘安全区，让游戏更友好
+                        
+                        const centerOffsetX = dx / halfWidth;
+                        const centerOffsetZ = dz / halfDepth;
+                        const stabilityFactor = minDistanceToEdge / edgeThreshold;
+                        const isUnstable = minDistanceToEdge < edgeThreshold;
+                        
+                        player.position.y = platformTop + 0.5;
+                        player.userData.velocity.set(0, 0, 0);
+                        player.userData.isOnGround = true;
+                        player.userData.isStabilizing = true;
+                        player.userData.landingTime = Date.now();
+                        player.userData.centerOfMass.set(dx, 0, dz);
+                        
+                        if (isUnstable) {
+                            // 不稳定落地 - 但摇晃强度降低，给玩家更多机会
+                            const tiltStrength = (1 - stabilityFactor) * 0.45; // 从0.6降低到0.45
+                            player.userData.stabilizingRotation.x = centerOffsetZ * tiltStrength;
+                            player.userData.stabilizingRotation.y = centerOffsetX * tiltStrength;
+                        } else {
+                            const tiltStrength = 0.12; // 从0.15降低到0.12
+                            player.userData.stabilizingRotation.x = centerOffsetZ * tiltStrength;
+                            player.userData.stabilizingRotation.y = centerOffsetX * tiltStrength;
+                        }
+                        
+                        isJumping = false;
+                        currentPlatformIndex = i;
+                        
+                        calculateScore(targetPlatform, dx, dz, halfWidth, halfDepth);
+                        generateNextPlatform();
+                        
+                        if (platforms.length > 8) {
+                            const oldPlatform = platforms.shift();
+                            scene.remove(oldPlatform);
+                            currentPlatformIndex--;
+                        }
+                        
+                        return;
+                    } else {
+                        // 侧面碰撞 - 检查具体碰撞到哪一面
+                        const collisionNormal = new THREE.Vector3();
+                        let hasCollision = false;
+                        
+                        // 检查四个侧面
+                        if (Math.abs(dx) > halfWidth && Math.abs(dz) <= halfDepth) {
+                            // 左右侧面碰撞
+                            collisionNormal.x = Math.sign(dx);
+                            hasCollision = true;
+                        } else if (Math.abs(dz) > halfDepth && Math.abs(dx) <= halfWidth) {
+                            // 前后侧面碰撞
+                            collisionNormal.z = Math.sign(dz);
+                            hasCollision = true;
+                        } else if (Math.abs(dx) > halfWidth && Math.abs(dz) > halfDepth) {
+                            // 边角碰撞
+                            collisionNormal.x = Math.sign(dx);
+                            collisionNormal.z = Math.sign(dz);
+                            collisionNormal.normalize();
+                            hasCollision = true;
+                        }
+                        
+                        if (hasCollision && playerBottom < platformTop && playerTop > platformBottom + 0.1) {
+                            // 应用碰撞反弹效果
+                            const velocityAlongNormal = player.userData.velocity.dot(collisionNormal);
+                            
+                            if (velocityAlongNormal < 0) {
+                                // 只有向着平台运动时才反弹
+                                const restitution = 0.3; // 恢复系数（反弹强度）
+                                const friction = 0.7; // 摩擦系数
+                                
+                                // 计算反弹速度
+                                const reflectedVelocity = collisionNormal.clone().multiplyScalar(-velocityAlongNormal * restitution);
+                                
+                                // 应用反弹
+                                player.userData.velocity.add(reflectedVelocity);
+                                
+                                // 应用摩擦（减少切向速度）
+                                const tangentVelocity = player.userData.velocity.clone()
+                                    .sub(collisionNormal.clone().multiplyScalar(player.userData.velocity.dot(collisionNormal)));
+                                player.userData.velocity.sub(tangentVelocity.multiplyScalar(1 - friction));
+                                
+                                // 添加旋转效果
+                                if (!player.userData.fallRotationVelocity) {
+                                    player.userData.fallRotationVelocity = new THREE.Vector2(0, 0);
+                                }
+                                player.userData.fallRotationVelocity.x += collisionNormal.z * 3;
+                                player.userData.fallRotationVelocity.y += collisionNormal.x * 3;
+                                
+                                // 稍微推开，避免卡在平台里
+                                player.position.add(collisionNormal.clone().multiplyScalar(0.1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        function calculateScore(platform, dx, dz, halfWidth, halfDepth) {
+            if (platform.userData.scored) return;
+            platform.userData.scored = true;
+            
+            // Check if landed on center (within 20% of platform size)
+            const centerThreshold = Math.min(halfWidth, halfDepth) * 0.2;
+            const distanceFromCenter = Math.sqrt(dx * dx + dz * dz);
+            
+            let points = 1;
+            
+            // 大跳加分
+            if (skippedPlatforms > 0) {
+                const skipBonus = skippedPlatforms * 2; // 每跳过一个平台+2分
+                points += skipBonus;
+                
+                // 显示大跳提示
+                const comboElement = document.getElementById('combo');
+                comboElement.textContent = `大跳 ${skippedPlatforms + 1}级！+${skipBonus}`;
+                comboElement.style.opacity = '1';
+                setTimeout(() => {
+                    comboElement.style.opacity = '0';
+                }, 1500);
+            }
+            
+            if (distanceFromCenter <= centerThreshold) {
+                // Center hit - combo bonus
+                combo++;
+                const comboPoints = Math.min(2 + (combo - 1) * 2, 32); // 2, 4, 6, 8... max 32
+                points += comboPoints;
+                
+                // Show combo
+                const comboElement = document.getElementById('combo');
+                if (skippedPlatforms > 0) {
+                    setTimeout(() => {
+                        comboElement.textContent = `${combo}x 连击！+${comboPoints}`;
+                        comboElement.style.opacity = '1';
+                        setTimeout(() => {
+                            comboElement.style.opacity = '0';
+                        }, 1000);
+                    }, 1600);
+                } else {
+                    comboElement.textContent = `${combo}x 连击！+${comboPoints}`;
+                    comboElement.style.opacity = '1';
+                    setTimeout(() => {
+                        comboElement.style.opacity = '0';
+                    }, 1000);
+                }
+            } else {
+                // Missed center - reset combo
+                combo = 0;
+            }
+            
+            // Special platform bonus
+            if (platform.userData.bonus > 0) {
+                points += platform.userData.bonus;
+                
+                // Show bonus message
+                const comboElement = document.getElementById('combo');
+                setTimeout(() => {
+                    comboElement.textContent = `特殊方块！+${platform.userData.bonus}`;
+                    comboElement.style.opacity = '1';
+                    setTimeout(() => {
+                        comboElement.style.opacity = '0';
+                    }, 1500);
+                }, skippedPlatforms > 0 ? 3200 : 0);
+            }
+            
+            score += points;
+            document.getElementById('score').textContent = score;
+            
+            // 重置跳过计数
+            skippedPlatforms = 0;
+        }
+        
+        function updateCamera() {
+            const targetPlatform = platforms[currentPlatformIndex];
+            if (!targetPlatform) return;
+            
+            // Smooth camera follow - 增加平滑度
+            const targetCameraPos = new THREE.Vector3(
+                targetPlatform.position.x + 5,
+                8,
+                targetPlatform.position.z + 12
+            );
+            
+            camera.position.lerp(targetCameraPos, 0.1);
+            
+            // 平滑的视角跟随
+            const lookAtTarget = new THREE.Vector3(
+                targetPlatform.position.x,
+                0,
+                targetPlatform.position.z
+            );
+            
+            // 使用当前相机的lookAt目标进行插值
+            if (!camera.userData.currentLookAt) {
+                camera.userData.currentLookAt = new THREE.Vector3(0, 0, 0);
+            }
+            
+            camera.userData.currentLookAt.lerp(lookAtTarget, 0.1);
+            camera.lookAt(camera.userData.currentLookAt);
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const deltaTime = 1 / 60; // Fixed timestep
+            
+            if (gameState === 'playing') {
+                updateCharging();
+                updatePlayer(deltaTime);
+                updateCamera(); // 每帧都更新相机，而不是只在落地时更新
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        function startGame() {
+            gameState = 'playing';
+            document.getElementById('startScreen').classList.add('hidden');
+            document.getElementById('instructions').style.display = 'block';
+            
+            // Hide instructions after 3 seconds
+            setTimeout(() => {
+                document.getElementById('instructions').style.opacity = '0';
+                setTimeout(() => {
+                    document.getElementById('instructions').style.display = 'none';
+                }, 500);
+            }, 3000);
+        }
+        
+        function gameOver() {
+            gameState = 'gameover';
+            document.getElementById('finalScore').textContent = score;
+            document.getElementById('gameOverScreen').classList.remove('hidden');
+        }
+        
+        function restartGame() {
+            // Reset game state
+            gameState = 'playing';
+            score = 0;
+            combo = 0;
+            currentPlatformIndex = 0;
+            isJumping = false;
+            isCharging = false;
+            skippedPlatforms = 0;
+            
+            document.getElementById('score').textContent = '0';
+            document.getElementById('gameOverScreen').classList.add('hidden');
+            
+            // 移除抛物线
+            removeTrajectoryLine();
+            
+            // Clear platforms
+            platforms.forEach(platform => scene.remove(platform));
+            platforms = [];
+            
+            // Reset player
+            player.position.set(0, 1.5, 0); // 修正重置时的高度
+            player.rotation.set(0, 0, 0);
+            player.scale.set(1, 1, 1); // 重置缩放
+            player.userData.velocity.set(0, 0, 0);
+            player.userData.isOnGround = true;
+            player.userData.tiltAngle = 0;
+            player.userData.squishAmount = 0;
+            player.userData.isStabilizing = false;
+            player.userData.landingTime = 0;
+            player.userData.stabilizingRotation = new THREE.Vector2(0, 0);
+            player.userData.centerOfMass = new THREE.Vector3(0, 0, 0);
+            player.userData.fallRotationVelocity = null;
+            
+            // Reset camera
+            camera.position.set(5, 8, 12);
+            camera.lookAt(0, 0, 0);
+            camera.userData.currentLookAt = new THREE.Vector3(0, 0, 0);
+            
+            // Recreate platforms
+            createInitialPlatforms();
+        }
+        
+        // Initialize game
+        init();
+    </script>
+</body>
+</html>

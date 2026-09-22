@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>跳一跳 3D</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; background: #d4e8f5; }
+canvas#game { display: block; width: 100%; height: 100%; position: fixed; top: 0; left: 0; }
+
+#score-display {
+  position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+  font-size: 64px; font-weight: 300; color: #4a4a4a;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  pointer-events: none; opacity: 0; transition: opacity 0.4s; z-index: 10;
+}
+#score-display.visible { opacity: 1; }
+
+#combo-indicator {
+  position: fixed; top: 130px; left: 50%; transform: translateX(-50%);
+  font-size: 24px; font-weight: 600; color: #e67e22;
+  pointer-events: none; opacity: 0; transition: all 0.25s; z-index: 10;
+}
+#combo-indicator.visible { opacity: 1; transform: translateX(-50%) scale(1.15); }
+
+#overlay {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; z-index: 100;
+  background: linear-gradient(180deg, #eaf4fc 0%, #d6e9f5 60%, #c9dff2 100%);
+  transition: opacity 0.5s; cursor: pointer;
+}
+#overlay.hidden { opacity: 0; pointer-events: none; }
+#overlay h1 { font-size: 44px; color: #3a3a3c; font-weight: 300; letter-spacing: 6px; }
+#overlay .sub { font-size: 15px; color: #8a9baa; margin-top: 24px; animation: fade-pulse 2s infinite; }
+@keyframes fade-pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+#gameover-panel {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; z-index: 100;
+  background: rgba(235,242,248,0.93); backdrop-filter: blur(6px);
+  opacity: 0; pointer-events: none; transition: opacity 0.4s;
+}
+#gameover-panel.visible { opacity: 1; pointer-events: all; }
+#gameover-panel h2 { font-size: 32px; color: #4a4a4c; font-weight: 300; margin-bottom: 6px; }
+#final-score { font-size: 72px; color: #e85d4a; font-weight: 200; margin: 8px 0; }
+#best-label { font-size: 14px; color: #9aaabb; margin-bottom: 36px; }
+#restart-btn {
+  padding: 13px 44px; font-size: 17px; color: #fff; background: #5b9bd5;
+  border: none; border-radius: 28px; cursor: pointer; outline: none;
+  box-shadow: 0 4px 14px rgba(91,155,213,0.3); transition: transform .15s;
+}
+#restart-btn:active { transform: scale(.96); }
+
+#loading-tip { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 13px; color: #8a9baa; z-index: 200; pointer-events: none; }
+
+#power-bar-bg {
+  position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+  width: 180px; height: 5px; background: rgba(0,0,0,0.07);
+  border-radius: 3px; overflow: hidden; opacity: 0; transition: opacity .2s; z-index: 10; pointer-events: none;
+}
+#power-bar-bg.visible { opacity: 1; }
+#power-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #7ec8e3, #4a8ec7); border-radius: 3px; }
+
+#audio-toggles { position: fixed; top: 16px; right: 16px; display: flex; gap: 8px; z-index: 20; }
+.audio-btn {
+  width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(255,255,255,0.7); backdrop-filter: blur(6px);
+  font-size: 18px; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08); transition: transform .15s, background .2s;
+}
+.audio-btn:hover { transform: scale(1.1); background: rgba(255,255,255,0.9); }
+.audio-btn.off { opacity: 0.45; filter: grayscale(1); }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+<div id="score-display">0</div>
+<div id="combo-indicator">+2</div>
+
+<div id="overlay">
+  <h1>跳一跳</h1>
+  <p class="sub" id="overlay-sub">按住屏幕蓄力，松开跳跃</p>
+</div>
+
+<div id="gameover-panel">
+  <h2>游戏结束</h2>
+  <div id="final-score">0</div>
+  <div id="best-label">最高分: 0</div>
+  <button id="restart-btn">再来一局</button>
+</div>
+
+<div id="loading-tip"></div>
+<div id="power-bar-bg"><div id="power-bar-fill"></div></div>
+
+<div id="audio-toggles">
+  <button class="audio-btn" id="sfx-toggle" title="音效开关">🔊</button>
+  <button class="audio-btn" id="bgm-toggle" title="音乐开关">🎵</button>
+</div>
+
+<script>
+// ===== Multi-CDN Three.js loader with progress feedback =====
+(function loadThree() {
+  var cdns = [
+    'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js',
+    'https://unpkg.com/three@0.128.0/build/three.min.js',
+    'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js'
+  ];
+  var tip = document.getElementById('loading-tip');
+  tip.textContent = '正在加载引擎...';
+
+  function tryLoad(i) {
+    if (i >= cdns.length) {
+      tip.textContent = '';
+      document.getElementById('overlay-sub').textContent = 'Three.js 加载失败，请检查网络后刷新';
+      document.getElementById('overlay-sub').style.color = '#e74c3c';
+      return;
+    }
+    var s = document.createElement('script');
+    s.src = cdns[i];
+    s.onload = function() {
+      tip.textContent = '';
+      if (typeof THREE !== 'undefined') {
+        initGame();
+      } else {
+        tryLoad(i + 1);
+      }
+    };
+    s.onerror = function() {
+      tip.textContent = '源' + (i+1) + '失败，尝试下一个...';
+      tryLoad(i + 1);
+    };
+    document.head.appendChild(s);
+  }
+  tryLoad(0);
+})();
+
+// ===== Audio System (Web Audio API, all synthesized) =====
+var audioCtx = null;
+var sfxOn = localStorage.getItem('jg_sfx') !== 'off';
+var bgmOn = localStorage.getItem('jg_bgm') === 'on'; // BGM default off
+var bgmPlaying = false;
+var bgmTimer = null;
+
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+// --- SFX synthesis helpers ---
+function playTone(freq, dur, type, vol, freqEnd) {
+  if (!audioCtx || !sfxOn) return;
+  var osc = audioCtx.createOscillator();
+  var gain = audioCtx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (freqEnd) osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd, 20), audioCtx.currentTime + dur);
+  gain.gain.setValueAtTime(vol || 0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur + 0.05);
+}
+
+function sfxJump() {
+  ensureAudioCtx();
+  playTone(480, 0.12, 'sine', 0.25, 180);
+}
+
+function sfxLand() {
+  ensureAudioCtx();
+  playTone(130, 0.09, 'triangle', 0.35);
+}
+
+function sfxCombo(level) {
+  ensureAudioCtx();
+  var base = 523 + (level - 1) * 80; // rises with combo level
+  playTone(base, 0.07, 'sine', 0.2);
+  setTimeout(function(){ playTone(base * 1.26, 0.07, 'sine', 0.2); }, 50);
+  setTimeout(function(){ playTone(base * 1.5, 0.1, 'sine', 0.22); }, 100);
+}
+
+function sfxSpecial() {
+  ensureAudioCtx();
+  playTone(1200, 0.35, 'sine', 0.18);
+  setTimeout(function(){ playTone(1600, 0.3, 'sine', 0.12); }, 40);
+}
+
+function sfxGameOver() {
+  ensureAudioCtx();
+  playTone(380, 0.7, 'sawtooth', 0.2, 60);
+}
+
+// 噪声脉冲（用于敲打/沙沙等打击声）
+function noiseBurst(dur, vol, lpFreq) {
+  if (!audioCtx || !sfxOn) return;
+  var buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * dur), audioCtx.sampleRate);
+  var d = buf.getChannelData(0);
+  for (var i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  var src = audioCtx.createBufferSource(); src.buffer = buf;
+  var lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = lpFreq || 1200;
+  var gain = audioCtx.createGain(); gain.gain.value = vol || 0.3;
+  src.connect(lp).connect(gain).connect(audioCtx.destination);
+  src.start();
+}
+// 猫叫（双音上滑 "mew"）
+function sfxCat() {
+  ensureAudioCtx();
+  playTone(520, 0.1, 'sine', 0.22, 700);
+  setTimeout(function(){ playTone(700, 0.16, 'sine', 0.2, 980); }, 90);
+}
+// 敲打音（快递箱木盒）
+function sfxKnock() {
+  ensureAudioCtx();
+  noiseBurst(0.08, 0.3, 900);
+  playTone(180, 0.08, 'triangle', 0.3);
+  setTimeout(function(){ noiseBurst(0.06, 0.22, 700); playTone(150, 0.07, 'triangle', 0.24); }, 90);
+}
+// 沙沙音（草地/花盆）
+function sfxRustle() {
+  ensureAudioCtx();
+  noiseBurst(0.16, 0.16, 2400);
+  noiseBurst(0.1, 0.1, 3000);
+}
+function playThemeSound(theme) {
+  if (!theme) return;
+  if (theme === 'cat') sfxCat();
+  else if (theme === 'box') sfxKnock();
+  else if (theme === 'pot' || theme === 'grass') sfxRustle();
+}
+
+// --- BGM: simple chiptune loop (~110 BPM pentatonic) ---
+var BGM_NOTES = [
+  // Bar 1
+  {n:523,d:0.45},{n:659,d:0.45},{n:784,d:0.45},{n:880,d:0.5},
+  // Bar 2
+  {n:784,d:0.45},{n:659,d:0.45},{n:587,d:0.45},{n:523,d:0.5},
+  // Bar 3
+  {n:523,d:0.45},{n:587,d:0.45},{n:659,d:0.45},{n:784,d:0.5},
+  // Bar 4
+  {n:880,d:0.45},{n:784,d:0.45},{n:659,d:0.45},{n:523,d:0.5}
+];
+var BGM_BEAT = 0.545; // seconds per beat at ~110 BPM
+
+function scheduleBgmNote(freq, startTime, dur) {
+  if (!audioCtx || !bgmOn) return;
+  var osc = audioCtx.createOscillator();
+  var gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.12, startTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, startTime + dur * 0.9);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(startTime);
+  osc.stop(startTime + dur);
+}
+
+function startBgm() {
+  if (bgmPlaying || !bgmOn) return;
+  ensureAudioCtx();
+  bgmPlaying = true;
+  var noteIdx = 0, nextTime = audioCtx.currentTime + 0.1;
+  bgmTimer = setInterval(function() {
+    if (!audioCtx || !bgmOn) { stopBgm(); return; }
+    // Schedule notes up to 200ms ahead
+    while (nextTime < audioCtx.currentTime + 0.25) {
+      var note = BGM_NOTES[noteIdx % BGM_NOTES.length];
+      scheduleBgmNote(note.n, nextTime, note.d);
+      // Bass note on beat 1 of each bar (every 4 notes)
+      if (noteIdx % 4 === 0) {
+        scheduleBgmNote(note.n / 2, nextTime, note.d * 1.5);
+      }
+      nextTime += BGM_BEAT;
+      noteIdx++;
+    }
+  }, 80);
+}
+
+function stopBgm() {
+  bgmPlaying = false;
+  if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = null; }
+}
+
+// --- Toggle buttons ---
+var sfxBtn = document.getElementById('sfx-toggle');
+var bgmBtn = document.getElementById('bgm-toggle');
+
+function updateAudioUI() {
+  sfxBtn.textContent = sfxOn ? '🔊' : '🔇';
+  sfxBtn.classList.toggle('off', !sfxOn);
+  bgmBtn.textContent = bgmOn ? '🎵' : '🚫';
+  bgmBtn.classList.toggle('off', !bgmOn);
+}
+
+sfxBtn.addEventListener('click', function(e) {
+  e.stopPropagation();
+  ensureAudioCtx();
+  sfxOn = !sfxOn;
+  localStorage.setItem('jg_sfx', sfxOn ? 'on' : 'off');
+  updateAudioUI();
+});
+
+bgmBtn.addEventListener('click', function(e) {
+  e.stopPropagation();
+  ensureAudioCtx();
+  bgmOn = !bgmOn;
+  localStorage.setItem('jg_bgm', bgmOn ? 'on' : 'off');
+  if (bgmOn) startBgm(); else stopBgm();
+  updateAudioUI();
+});
+
+// Init UI state on load
+updateAudioUI();
+
+// Lazy AudioContext creation on first interaction
+document.addEventListener('mousedown', ensureAudioCtx, {once: false});
+document.addEventListener('touchstart', ensureAudioCtx, {once: false});
+document.addEventListener('keydown', ensureAudioCtx, {once: false});
+
+function initGame() {
+'use strict';
+
+var canvas = document.getElementById('game');
+var overlay = document.getElementById('overlay');
+var gameoverPanel = document.getElementById('gameover-panel');
+var scoreEl = document.getElementById('score-display');
+var comboEl = document.getElementById('combo-indicator');
+
+// --- Config ---
+var MAX_CHARGE = 1.6;
+var ARC_H = 2.0;
+var BLOCK_BASE = 1.2;
+var BLOCK_MIN = 0.72;
+var GAP_BASE = 2.4;
+var GAP_RANGE = 2.2;
+var ANGLE_SPREAD = 0.5;
+var CENTER_R = 0.2;
+var CAM_OFF_Y = 6.5;
+var CAM_OFF_Z = 9.5;
+var CAM_LERP = 0.07;
+
+// --- State ---
+var state = 'idle'; // idle | playing | jumping | falling | over
+var score = 0, combo = 0;
+var bestScore = parseInt(localStorage.getItem('j3d_best') || '0');
+var blocks = [];
+var curIdx = 0;
+var charGroup = null;
+var charging = false, chargeT0 = 0, power = 0;
+var jumpT0 = 0, jumpDur = 0, jFrom = [0,0,0], jTo = [0,0,0], jTarget = 0, willLand = false, isSmallHop = false;
+// 每局随机固定的路线主方向（相机朝向与路径主轴一致，局内永不旋转）
+var routeAngle = 0, camDirX = 0, camDirZ = 1;
+// 大跳标记：本跳是否隔块大跳（得分翻倍）
+var isBigJump = false;
+var BIG_JUMP_POWER = 0.92;   // 蓄力阈值
+var COMPLEX_IDX = 100;       // 约100分后进入复杂路线
+
+// --- Three.js scene ---
+var renderer, scene, camera, dirLight;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+} catch(e) {
+  document.getElementById('overlay-sub').textContent = 'WebGL 不可用: ' + e.message;
+  return;
+}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+scene = new THREE.Scene();
+scene.background = new THREE.Color(0xd6e9f5);
+scene.fog = new THREE.Fog(0xcfe2f0, 14, 52);
+
+camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0, CAM_OFF_Y, CAM_OFF_Z);
+camera.lookAt(0, 0, 4);
+
+// Lights
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+dirLight = new THREE.DirectionalLight(0xfff8ee, 0.75);
+dirLight.position.set(5, 12, 8);
+dirLight.castShadow = true;
+var sc = dirLight.shadow.camera;
+sc.near=1; sc.far=35; sc.left=-10; sc.right=10; sc.top=10; sc.bottom=-10;
+dirLight.shadow.mapSize.set(1024, 1024);
+scene.add(dirLight);
+var fill = new THREE.DirectionalLight(0xd0e8ff, 0.2);
+fill.position.set(-4, 5, -6);
+scene.add(fill);
+
+// --- Character (pawn figurine) ---
+function makeChar() {
+  var g = new THREE.Group();
+  var matBody = new THREE.MeshStandardMaterial({ color: 0x3a3a3c, roughness: 0.4 });
+  var matHead = new THREE.MeshStandardMaterial({ color: 0x484850, roughness: 0.35 });
+
+  var body = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.3, 0.65, 12), matBody);
+  body.position.y = 0.33; body.castShadow = true; g.add(body);
+
+  var head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 14, 14), matHead);
+  head.position.y = 0.78; head.castShadow = true; g.add(head);
+
+  var base = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.35, 0.06, 12), matBody);
+  base.position.y = 0.03; base.castShadow = true; g.add(base);
+
+  return g;
+}
+
+// ===== Procedural block textures (Canvas 2D, no external assets) =====
+var texCache = {};
+function makeCanvas(size) {
+  var c = document.createElement('canvas');
+  c.width = c.height = size;
+  return c;
+}
+function toTexture(canvas) {
+  var t = new THREE.CanvasTexture(canvas);
+  t.anisotropy = 4;
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+// 猫脸
+function drawCat(ctx, s) {
+  var cx = s/2, cy = s/2;
+  ctx.fillStyle = '#f7f0e3'; ctx.fillRect(0,0,s,s);
+  // 耳朵
+  ctx.fillStyle = '#f0a868';
+  ctx.beginPath(); ctx.moveTo(cx-s*0.30, cy-s*0.12); ctx.lineTo(cx-s*0.40, cy-s*0.44); ctx.lineTo(cx-s*0.14, cy-s*0.28); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+s*0.30, cy-s*0.12); ctx.lineTo(cx+s*0.40, cy-s*0.44); ctx.lineTo(cx+s*0.14, cy-s*0.28); ctx.closePath(); ctx.fill();
+  // 头
+  ctx.fillStyle = '#f0a868';
+  ctx.beginPath(); ctx.arc(cx, cy+s*0.02, s*0.32, 0, Math.PI*2); ctx.fill();
+  // 眼睛
+  ctx.fillStyle = '#3a3a3c';
+  ctx.beginPath(); ctx.ellipse(cx-s*0.13, cy-s*0.03, s*0.045, s*0.06, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx+s*0.13, cy-s*0.03, s*0.045, s*0.06, 0, 0, Math.PI*2); ctx.fill();
+  // 鼻子
+  ctx.fillStyle = '#e06a5a';
+  ctx.beginPath(); ctx.moveTo(cx, cy+s*0.07); ctx.lineTo(cx-s*0.04, cy+s*0.03); ctx.lineTo(cx+s*0.04, cy+s*0.03); ctx.closePath(); ctx.fill();
+  // 嘴
+  ctx.strokeStyle = '#7a5a4a'; ctx.lineWidth = s*0.012;
+  ctx.beginPath(); ctx.moveTo(cx, cy+s*0.09); ctx.quadraticCurveTo(cx-s*0.06, cy+s*0.14, cx-s*0.1, cy+s*0.1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy+s*0.09); ctx.quadraticCurveTo(cx+s*0.06, cy+s*0.14, cx+s*0.1, cy+s*0.1); ctx.stroke();
+  // 胡须
+  ctx.strokeStyle = '#c9a888'; ctx.lineWidth = s*0.01;
+  [-1,1].forEach(function(sg){
+    for (var i=-1;i<=1;i++){
+      ctx.beginPath(); ctx.moveTo(cx+sg*s*0.16, cy+s*0.06+i*s*0.04); ctx.lineTo(cx+sg*s*0.34, cy+s*0.02+i*s*0.05); ctx.stroke();
+    }
+  });
+}
+// 快递箱
+function drawBox(ctx, s) {
+  var cx = s/2, cy = s/2;
+  ctx.fillStyle = '#d8b478'; ctx.fillRect(0,0,s,s);
+  // 箱体阴影描边
+  ctx.strokeStyle = '#a87e48'; ctx.lineWidth = s*0.03; ctx.strokeRect(s*0.06, s*0.06, s*0.88, s*0.88);
+  // 封箱胶带
+  ctx.fillStyle = '#e8d8b8';
+  ctx.fillRect(s*0.42, 0, s*0.16, s);
+  ctx.fillRect(0, s*0.42, s, s*0.16);
+  // 胶带边缘
+  ctx.strokeStyle = '#c8a868'; ctx.lineWidth = s*0.012;
+  ctx.strokeRect(s*0.42, 0, s*0.16, s);
+  // 快递单
+  ctx.fillStyle = '#fdfdfb'; ctx.fillRect(s*0.12, s*0.14, s*0.26, s*0.2);
+  ctx.strokeStyle = '#bbb'; ctx.lineWidth = s*0.008;
+  for (var i=0;i<4;i++){ ctx.beginPath(); ctx.moveTo(s*0.15, s*0.18+i*s*0.045); ctx.lineTo(s*0.34, s*0.18+i*s*0.045); ctx.stroke(); }
+  // 条形码
+  ctx.fillStyle = '#333';
+  var bx = s*0.62;
+  for (var j=0;j<10;j++){ var w = (j%3===0)?s*0.02:s*0.008; ctx.fillRect(bx, s*0.62, w, s*0.2); bx += w + s*0.006; }
+  // 向上箭头标志
+  ctx.strokeStyle = '#8a5a2a'; ctx.lineWidth = s*0.018;
+  ctx.beginPath(); ctx.moveTo(s*0.7, s*0.52); ctx.lineTo(s*0.78, s*0.44); ctx.lineTo(s*0.86, s*0.52); ctx.moveTo(s*0.78, s*0.44); ctx.lineTo(s*0.78, s*0.54); ctx.stroke();
+}
+// 花盆
+function drawPot(ctx, s) {
+  var cx = s/2, cy = s/2;
+  ctx.fillStyle = '#eef4ea'; ctx.fillRect(0,0,s,s);
+  // 泥土
+  ctx.fillStyle = '#6a4a2a';
+  ctx.beginPath(); ctx.ellipse(cx, cy+s*0.2, s*0.24, s*0.06, 0, 0, Math.PI*2); ctx.fill();
+  // 花盆（陶土梯形）
+  var grad = ctx.createLinearGradient(0, cy+s*0.18, 0, cy+s*0.52);
+  grad.addColorStop(0, '#d98a5a'); grad.addColorStop(1, '#b5653c');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(cx-s*0.26, cy+s*0.18); ctx.lineTo(cx+s*0.26, cy+s*0.18);
+  ctx.lineTo(cx+s*0.18, cy+s*0.52); ctx.lineTo(cx-s*0.18, cy+s*0.52); ctx.closePath(); ctx.fill();
+  // 盆口
+  ctx.fillStyle = '#e09a6a';
+  ctx.fillRect(cx-s*0.28, cy+s*0.15, s*0.56, s*0.05);
+  // 植物（几片叶子）
+  ctx.fillStyle = '#5aa84a';
+  function leaf(x,y,ang,len){ ctx.save(); ctx.translate(x,y); ctx.rotate(ang); ctx.beginPath(); ctx.ellipse(0,-len/2, s*0.05, len/2, 0, 0, Math.PI*2); ctx.fill(); ctx.restore(); }
+  leaf(cx, cy+s*0.18, 0, s*0.3);
+  leaf(cx, cy+s*0.18, -0.5, s*0.24);
+  leaf(cx, cy+s*0.18, 0.5, s*0.24);
+  leaf(cx, cy+s*0.18, -1.0, s*0.18);
+  leaf(cx, cy+s*0.18, 1.0, s*0.18);
+  // 小花
+  ctx.fillStyle = '#e86a8a';
+  ctx.beginPath(); ctx.arc(cx, cy-s*0.08, s*0.05, 0, Math.PI*2); ctx.fill();
+}
+// MC 草方块（像素风）
+function drawGrass(ctx, s) {
+  var px = Math.floor(s/16); // 16x16 像素
+  var greens = ['#5cbf4a','#54b043','#62c852','#4da03a','#6fd05e'];
+  var dirt = ['#7a5a3a','#6a4a2e','#8a6a44'];
+  // 上 5 行草地
+  for (var y=0;y<16;y++){
+    for (var x=0;x<16;x++){
+      if (y < 5) {
+        var g = greens[(x*3+y*7)%greens.length];
+        if ((x*7+y*5)%11===0) g = greens[(x+y)%greens.length];
+        ctx.fillStyle = g;
+      } else {
+        ctx.fillStyle = dirt[(x*5+y*3)%dirt.length];
+      }
+      // 草地边缘过渡（第 5-6 行随机棕色斑点）
+      if (y>=5 && y<7 && (x*13+y)%5===0) ctx.fillStyle = greens[(x+y)%greens.length];
+      ctx.fillRect(x*px, y*px, px, px);
+    }
+  }
+}
+var THEME_DRAW = { cat: drawCat, box: drawBox, pot: drawPot, grass: drawGrass };
+function getThemeTexture(theme) {
+  if (texCache[theme]) return texCache[theme];
+  var c = makeCanvas(128);
+  var ctx = c.getContext('2d');
+  THEME_DRAW[theme](ctx, 128);
+  texCache[theme] = toTexture(c);
+  return texCache[theme];
+}
+
+// --- Block factory ---
+function makeBlock(sz, special, theme) {
+  var g = new THREE.Group();
+  var h = sz * 0.5;
+  var geo = new THREE.BoxGeometry(sz, h, sz);
+  var col = 0xf2f2ec;
+  if (special === 'music') col = 0xf5e6cc;
+  else if (special === 'store') col = 0xe4f0e4;
+  else if (special === 'cube') col = 0xeee8d8;
+  else if (theme === 'grass') col = 0x7a5a3a; // 草方块侧面为泥土色
+  else if (theme === 'box') col = 0xd8b478;
+  else if (theme === 'pot') col = 0xd98a5a;
+  else if (theme === 'cat') col = 0xf0a868;
+
+  var mat;
+  if (theme && THEME_DRAW[theme]) {
+    // 主题贴图块：顶面用贴图，侧面用对应底色
+    var topMat = new THREE.MeshStandardMaterial({ map: getThemeTexture(theme), roughness: 0.6 });
+    var sideMat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.5 });
+    mat = [sideMat, sideMat, topMat, topMat, sideMat, sideMat]; // +x,-x,+y,-y,+z,-z
+  } else {
+    mat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.42 });
+  }
+  var mesh = new THREE.Mesh(geo, mat);
+  mesh.position.y = h / 2;
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  g.add(mesh);
+
+  // Edge highlight
+  var eGeo = new THREE.EdgesGeometry(geo);
+  var eMat = new THREE.LineBasicMaterial({ color: 0xd8d8d0, transparent: true, opacity: 0.35 });
+  var edges = new THREE.LineSegments(eGeo, eMat);
+  edges.position.y = h / 2;
+  g.add(edges);
+
+  // Special indicator on top
+  if (special === 'music') {
+    var rec = new THREE.Mesh(new THREE.CylinderGeometry(sz*0.25, sz*0.25, 0.04, 12),
+      new THREE.MeshStandardMaterial({ color: 0x2a2a2a }));
+    rec.position.y = h + 0.02; g.add(rec);
+  } else if (special === 'store') {
+    var stripe = new THREE.Mesh(new THREE.BoxGeometry(sz*1.01, 0.05, sz*1.01),
+      new THREE.MeshStandardMaterial({ color: 0xd45a4a }));
+    stripe.position.y = h + 0.02; g.add(stripe);
+  } else if (special === 'cube') {
+    var top = new THREE.Mesh(new THREE.PlaneGeometry(sz*0.5, sz*0.5),
+      new THREE.MeshStandardMaterial({ color: 0xe8c84a }));
+    top.rotation.x = -Math.PI/2; top.position.y = h + 0.01; g.add(top);
+  }
+
+  return { group: g, size: sz, special: special || null };
+}
+
+// --- Path generation ---
+function genBlock(idx) {
+  if (idx === 0) return { x: 0, z: 0, size: BLOCK_BASE + 0.25, special: null };
+
+  var prev = blocks[idx - 1];
+  var diff = Math.min(idx / 50, 1);
+  var complex = idx >= COMPLEX_IDX; // 高分段：更复杂路线
+
+  // v4 式随机游走：方向继承上一步实际方向 + 随机偏转 → 路线自然蜿蜒
+  var dx, dz;
+  if (idx === 1) { dx = Math.cos(routeAngle); dz = Math.sin(routeAngle); }
+  else {
+    var pp = blocks[idx - 2];
+    var ddx = prev.x - pp.x, ddz = prev.z - pp.z;
+    var len = Math.sqrt(ddx*ddx + ddz*ddz) || 1;
+    dx = ddx/len; dz = ddz/len;
+  }
+
+  // 每步随机偏转（高分段幅度×1.5，路线更野）
+  var spread = ANGLE_SPREAD * (complex ? 1.5 : 1);
+  var aOff = (Math.random() - 0.5) * spread * 2;
+  var curAng = Math.atan2(dz, dx) + aOff;
+  // 航向钳制：始终限制在本局主轴 ±66° 内 → 棋子永远朝前、不会走出固定相机的视野
+  var delta = Math.atan2(Math.sin(curAng - routeAngle), Math.cos(curAng - routeAngle));
+  if (delta > 1.15) curAng = routeAngle + 1.15;
+  else if (delta < -1.15) curAng = routeAngle - 1.15;
+  var ndx = Math.cos(curAng), ndz = Math.sin(curAng);
+
+  // Gap：难度梯度（高分段间距更大、变化更大）
+  var gapBase = GAP_BASE + diff * GAP_RANGE * 0.6;
+  if (complex) gapBase *= 1.18;
+  var gap = gapBase + (Math.random()-0.5) * (complex ? 1.1 : 0.7);
+  gap = Math.max(gap, GAP_BASE * 0.8);
+
+  var nx = prev.x + ndx * gap;
+  var nz = prev.z + ndz * gap;
+
+  // Size shrinks with difficulty（高分段方块更小）
+  var shrink = diff * 0.35 + (complex ? 0.12 : 0);
+  var sz = Math.max(0.62, BLOCK_BASE - shrink) + (Math.random()-0.5)*0.12;
+
+  // Special block（彩蛋加分块，~7% 概率，idx>3 后出现）
+  var special = null;
+  if (idx > 3 && Math.random() < 0.07) {
+    var types = ['music','store','cube'];
+    special = types[Math.floor(Math.random()*types.length)];
+  }
+
+  // Themed block（主题贴图块：猫/快递箱/花盆/草方块，纯视觉+专属音效，无加分）
+  var theme = null;
+  if (!special && idx > 1 && Math.random() < 0.30) {
+    var themes = ['cat','box','pot','grass'];
+    theme = themes[Math.floor(Math.random()*themes.length)];
+  }
+
+  return { x: nx, z: nz, size: sz, special: special, theme: theme };
+}
+
+function addBlocks(count) {
+  for (var i = 0; i < count; i++) {
+    var data = genBlock(blocks.length);
+    var bObj = makeBlock(data.size, data.special, data.theme);
+    bObj.group.position.set(data.x, 0, data.z);
+    scene.add(bObj.group);
+    blocks.push({ x: data.x, z: data.z, size: data.size, special: data.special, theme: data.theme, mesh: bObj });
+  }
+}
+
+// --- Game init / reset ---
+function resetGame() {
+  // Remove old
+  for (var i = 0; i < blocks.length; i++) scene.remove(blocks[i].mesh.group);
+  if (charGroup) scene.remove(charGroup);
+  blocks = [];
+
+  score = 0; combo = 0; curIdx = 0;
+  state = 'playing';
+  charging = false; power = 0;
+  if (bgmOn) startBgm();
+
+  // 每局开局：随机固定一个主轴方向（从前往后/从左往右/斜向…），相机锁该方向、局内纯平移不旋转
+  routeAngle = Math.random() * Math.PI * 2;
+  camDirX = Math.cos(routeAngle);
+  camDirZ = Math.sin(routeAngle);
+
+  addBlocks(14);
+
+  charGroup = makeChar();
+  var b0 = blocks[0];
+  charGroup.position.set(b0.x, b0.size*0.5 + 0.01, b0.z);
+  scene.add(charGroup);
+
+  // Camera snap：相机固定在本局主轴身后，视线沿主轴前方（此后只做纯平移）
+  camera.position.set(b0.x - camDirX * CAM_OFF_Z, CAM_OFF_Y, b0.z - camDirZ * CAM_OFF_Z);
+  camPos.copy(camera.position);
+  camLook.set(b0.x + camDirX * 5, 1.5, b0.z + camDirZ * 5);
+  camera.lookAt(camLook);
+
+  scoreEl.textContent = '0';
+  scoreEl.classList.add('visible');
+  overlay.classList.add('hidden');
+  gameoverPanel.classList.remove('visible');
+}
+
+// --- Input ---
+function onDown(e) {
+  if (state !== 'playing') return;
+  e.preventDefault();
+  charging = true;
+  chargeT0 = performance.now();
+  power = 0;
+}
+function onUp(e) {
+  if (state !== 'playing' || !charging) return;
+  e.preventDefault();
+  charging = false;
+  var elapsed = (performance.now() - chargeT0) / 1000;
+  power = Math.min(elapsed / MAX_CHARGE, 1);
+
+  if (power > 0.04) doJump();
+  else smallHop();
+}
+
+canvas.addEventListener('mousedown', onDown);
+window.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', onDown, { passive: false });
+window.addEventListener('touchend', onUp, { passive: false });
+canvas.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+
+// Start / restart
+overlay.addEventListener('mousedown', function(){ if(state==='idle') resetGame(); });
+overlay.addEventListener('touchstart', function(e){ e.preventDefault(); if(state==='idle') resetGame(); }, {passive:false});
+document.getElementById('restart-btn').addEventListener('click', function(e){ e.stopPropagation(); resetGame(); });
+
+// --- Jump ---
+function smallHop() {
+  isSmallHop = true;
+  jFrom = [charGroup.position.x, charGroup.position.y, charGroup.position.z];
+  jTo = [jFrom[0], jFrom[1] + 0.2, jFrom[2]];
+  jumpT0 = performance.now() / 1000;
+  jumpDur = 0.22;
+  willLand = true;
+  sfxJump();
+  state = 'jumping';
+}
+
+function doJump() {
+  isSmallHop = false;
+  // 大跳判定：蓄力达到阈值 → 跳过中间一块，落到下下块（得分翻倍）
+  isBigJump = power >= BIG_JUMP_POWER;
+  var skip = isBigJump ? 2 : 1;
+  var nextIdx = curIdx + skip;
+  if (nextIdx >= blocks.length) addBlocks(6);
+  var target = blocks[nextIdx];
+
+  var fx = charGroup.position.x, fz = charGroup.position.z;
+  var tx = target.x, tz = target.z;
+
+  // Direction toward target
+  var ddx = tx - fx, ddz = tz - fz;
+  var dist = Math.sqrt(ddx*ddx + ddz*ddz);
+  var dx, dz;
+  if (dist < 0.01) { dx = 0; dz = 1; } else { dx = ddx/dist; dz = ddz/dist; }
+
+  // Jump distance based on power
+  var jumpDist;
+  if (isBigJump) {
+    // 大跳：直接飞抵目标块中心（完美隔块跳，必中），飞行距离更长
+    jumpDist = dist;
+  } else {
+    jumpDist = GAP_BASE * 0.5 + power * (GAP_RANGE + 2.5);
+  }
+
+  var lx = fx + dx * jumpDist;
+  var lz = fz + dz * jumpDist;
+
+  // Will it land?
+  var halfSz = target.size / 2 + 0.12;
+  willLand = (Math.abs(lx - tx) <= halfSz && Math.abs(lz - tz) <= halfSz);
+
+  // Clamp landing position within block surface to prevent visual clipping
+  if (willLand) {
+    var clampedHalf = target.size / 2 - 0.15;
+    lx = Math.max(tx - clampedHalf, Math.min(tx + clampedHalf, lx));
+    lz = Math.max(tz - clampedHalf, Math.min(tz + clampedHalf, lz));
+  }
+
+  jFrom = [fx, charGroup.position.y, fz];
+  jTo = [lx, target.size*0.5 + 0.01, lz];
+  jumpT0 = performance.now() / 1000;
+  jumpDur = 0.3 + jumpDist * 0.07;
+  jTarget = nextIdx;
+
+  sfxJump();
+  state = 'jumping';
+}
+
+// --- Scoring & game over ---
+function onLand(bIdx, lx, lz) {
+  var b = blocks[bIdx];
+  var dxc = lx - b.x, dzc = lz - b.z;
+  var dc = Math.sqrt(dxc*dxc + dzc*dzc);
+  var centerHit = dc <= CENTER_R * b.size;
+
+  // 基础分：中心命中走连击，否则 +1
+  var pts;
+  if (centerHit) {
+    combo++;
+    pts = 2 * combo;
+  } else {
+    combo = 0;
+    pts = 1;
+  }
+
+  // 大跳奖励：隔块跳跃，基础分翻倍
+  if (isBigJump) pts *= 2;
+  score += pts;
+
+  // 音效：连击琶音 / 默认落地音
+  if (centerHit) sfxCombo(combo);
+  else sfxLand();
+
+  // 主题方块专属音效（猫叫/敲打/沙沙…），与大跳提示叠加
+  playThemeSound(b.theme);
+
+  // 大跳额外闪光提示
+  if (isBigJump) {
+    comboEl.textContent = '大跳 ×2 +' + pts;
+    comboEl.classList.add('visible');
+    setTimeout(function(){ comboEl.classList.remove('visible'); }, 900);
+  } else if (centerHit) {
+    comboEl.textContent = '+' + pts;
+    comboEl.classList.add('visible');
+    setTimeout(function(){ comboEl.classList.remove('visible'); }, 700);
+  }
+
+  // 彩蛋加分块（独立于主题块）
+  if (b.special) {
+    var bonus = b.special==='music'?30 : b.special==='store'?15 : 10;
+    score += bonus;
+    sfxSpecial();
+    comboEl.textContent = '彩蛋 +'+bonus;
+    comboEl.classList.add('visible');
+    setTimeout(function(){ comboEl.classList.remove('visible'); }, 1000);
+  }
+
+  curIdx = bIdx;
+  isBigJump = false;
+  scoreEl.textContent = score;
+  scoreEl.style.transform = 'translateX(-50%) scale(1.08)';
+  setTimeout(function(){ scoreEl.style.transform='translateX(-50%) scale(1)'; }, 120);
+
+  if (score > bestScore) { bestScore = score; localStorage.setItem('j3d_best', String(bestScore)); }
+  if (curIdx + 8 >= blocks.length) addBlocks(6);
+}
+
+function onGameOver() {
+  state = 'falling';
+  sfxGameOver();
+  stopBgm();
+  var fy0 = charGroup.position.y, ft0 = performance.now();
+  (function fallAnim(){
+    var t = (performance.now()-ft0)/1000;
+    if(t < 1.1 && state==='falling'){
+      charGroup.position.y = fy0 - t*t*7;
+      charGroup.rotation.x = t*2.5;
+      requestAnimationFrame(fallAnim);
+    } else {
+      state = 'over';
+      document.getElementById('final-score').textContent = score;
+      document.getElementById('best-label').textContent = '最高分: '+bestScore;
+      gameoverPanel.classList.add('visible');
+      scoreEl.classList.remove('visible');
+    }
+  })();
+}
+
+// --- Animation loop ---
+var camPos = new THREE.Vector3().copy(camera.position);
+var camLook = new THREE.Vector3(0, 1, 4);
+
+function animate() {
+  requestAnimationFrame(animate);
+  var now = performance.now() / 1000;
+
+  // Charge squish + power bar
+  var pBarBg = document.getElementById('power-bar-bg');
+  var pBarFill = document.getElementById('power-bar-fill');
+  if (charging && state === 'playing') {
+    var el = (performance.now() - chargeT0) / 1000;
+    power = Math.min(el / MAX_CHARGE, 1);
+    charGroup.scale.y = 1 - power * 0.35;
+    charGroup.scale.x = 1 + power * 0.1;
+    charGroup.scale.z = 1 + power * 0.1;
+    pBarBg.classList.add('visible');
+    pBarFill.style.width = (power * 100) + '%';
+  } else if (state === 'playing') {
+    charGroup.scale.y += (1 - charGroup.scale.y) * 0.25;
+    charGroup.scale.x += (1 - charGroup.scale.x) * 0.25;
+    charGroup.scale.z += (1 - charGroup.scale.z) * 0.25;
+    pBarBg.classList.remove('visible');
+  }
+
+  // Jump arc
+  if (state === 'jumping') {
+    var t = (now - jumpT0) / jumpDur;
+    if (t < 1) {
+      var x = jFrom[0] + (jTo[0]-jFrom[0]) * t;
+      var z = jFrom[2] + (jTo[2]-jFrom[2]) * t;
+      // 大跳弧线更高，体现隔块飞跃
+      var arcH = isSmallHop ? 0.3 : (isBigJump ? ARC_H * 1.9 : ARC_H * (0.5 + power*0.7));
+      var y = jFrom[1] + (jTo[1]-jFrom[1])*t + Math.sin(t*Math.PI)*arcH;
+      charGroup.position.set(x, y, z);
+      if (!isSmallHop) {
+        // 正弦回正：起跳 0° → 最高点前倾最大 → 落地瞬间恰好回到 0°，无突变
+        var maxTilt = isBigJump ? 1.35 : 0.55 + power * 0.9; // 大跳翻越更夸张
+        charGroup.rotation.x = -Math.sin(t * Math.PI) * maxTilt;
+      }
+    } else {
+      charGroup.position.set(jTo[0], jTo[1], jTo[2]);
+      charGroup.rotation.x = 0;
+      charGroup.scale.set(1,1,1);
+
+      if (isSmallHop) { state='playing'; }
+      else if (willLand) { onLand(jTarget, jTo[0], jTo[2]); state='playing'; }
+      else {
+        // Check nearby blocks as fallback
+        var landed = false;
+        for (var i=Math.max(0,curIdx); i<blocks.length && i<curIdx+3; i++){
+          var bb=blocks[i];
+          if(Math.abs(jTo[0]-bb.x)<=bb.size/2 && Math.abs(jTo[2]-bb.z)<=bb.size/2){
+            onLand(i, jTo[0], jTo[2]); landed=true; break;
+          }
+        }
+        if(landed) state='playing'; else onGameOver();
+      }
+    }
+  }
+
+  // Camera follow：方向固定为本局主轴（camDirX/camDirZ），全程纯平移不旋转 → 防晕3D
+  if (state==='playing' || state==='jumping') {
+    var px = charGroup.position.x, py = charGroup.position.y, pz = charGroup.position.z;
+
+    // 相机位于角色身后（沿主轴反方向），高度恒定
+    var desiredX = px - camDirX * CAM_OFF_Z, desiredY = CAM_OFF_Y, desiredZ = pz - camDirZ * CAM_OFF_Z;
+    camPos.x += (desiredX - camPos.x) * CAM_LERP;
+    camPos.y += (desiredY - camPos.y) * CAM_LERP;
+    camPos.z += (desiredZ - camPos.z) * CAM_LERP;
+    camera.position.copy(camPos);
+
+    // 视线始终沿主轴前方，朝向恒定不变
+    var lookX = px + camDirX * 5, lookY = py + 1.5, lookZ = pz + camDirZ * 5;
+    camLook.x += (lookX - camLook.x) * CAM_LERP*0.7;
+    camLook.y += (lookY - camLook.y) * CAM_LERP*0.7;
+    camLook.z += (lookZ - camLook.z) * CAM_LERP*0.7;
+    camera.lookAt(camLook);
+
+    dirLight.position.set(px+5, py+12, pz+8);
+    if(dirLight.target){ dirLight.target.position.set(px,py,pz); dirLight.target.updateMatrixWorld(); }
+  }
+
+  renderer.render(scene, camera);
+}
+
+// Resize
+window.addEventListener('resize', function(){
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate();
+} // end initGame
+</script>
+</body>
+</html>

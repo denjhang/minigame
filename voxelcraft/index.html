@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Voxelcraft · 网页版 3D 我的世界</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    { "imports": { "three": "./lib/three.module.min.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- 准星 -->
+  <div id="crosshair"><span></span><span></span></div>
+
+  <!-- 破坏进度条 -->
+  <div id="break-bar"></div>
+
+  <!-- 顶部 HUD -->
+  <div id="hud-top">
+    <span id="hud-clock">06:50 ☀️</span>
+    <span id="hud-fps">60 FPS</span>
+    <span id="hud-pos">0 / 0 / 0</span>
+  </div>
+
+  <!-- 提示消息 -->
+  <div id="hud-msg" class="hidden"></div>
+
+  <!-- 热键栏 -->
+  <div id="hotbar"></div>
+
+  <!-- 开始遮罩 -->
+  <div id="overlay">
+    <div class="panel">
+      <h1>⛏ Voxelcraft</h1>
+      <p class="sub">网页版 3D 我的世界 · Three.js 体素引擎</p>
+      <ul class="keys">
+        <li><b>W A S D</b> 移动 &nbsp; <b>空格</b> 跳跃（水中为游泳）</li>
+        <li><b>Ctrl / X</b> 疾跑 &nbsp; <b>鼠标</b> 视角</li>
+        <li><b>按住左键</b> 挖掘方块（按原版硬度计时）</li>
+        <li><b>右键</b> 放置当前选中方块</li>
+        <li><b>1-9 / 滚轮</b> 切换热键栏 &nbsp; <b>Esc</b> 释放鼠标</li>
+      </ul>
+      <div class="start-btn">点 击 任 意 处 开 始</div>
+      <p class="tip">机制数据来自原版 Minecraft（步行 4.317、疾跑 5.612、跳跃 1.25 格、
+      一天 20 分钟、泥土 0.75s / 石头 2.25s / 圆石 3.0s、基岩不可破坏）</p>
+    </div>
+  </div>
+
+  <script>
+    // 开发期错误钩子：未捕获异常写入 window.__lastError（不影响游戏）
+    window.addEventListener('error', (e) => {
+      window.__lastError = (e.message || 'error') + ' @ ' + (e.filename || '') + ':' + (e.lineno || '');
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      window.__lastError = 'unhandledrejection: ' + (e.reason && e.reason.message || e.reason);
+    });
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

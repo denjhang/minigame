@@ -7,6 +7,7 @@ export class Input {
     this.locked = false;
     this.fallback = false;   // Pointer Lock 不可用时的回退模式
     this.lockRejected = false; // 本环境是否拒绝过 Pointer Lock（一旦拒绝则永久回退）
+    this.started = false;    // 玩家已点开始 → 锁丢失后游戏仍保持活跃（同原版 Esc 暂停菜单）
     this.keys = new Set();
     this.mouseButtons = new Set();
     this.mouseDX = 0;
@@ -61,19 +62,34 @@ export class Input {
       // 无论锁定成功还是丢失，都要通知主程序（成功→隐藏开始画面）
       if (this.onLockChange) this.onLockChange(this.locked);
     });
-    document.addEventListener('pointerlockerror', () => {
-      // 锁定被拒（常见于 iframe/内嵌环境）→ 永久进入回退模式
-      this.lockRejected = true;
-      this.fallback = true;
-      if (this.onLockChange) this.onLockChange(this.locked);
-    });
+    document.addEventListener('pointerlockerror', () => this.enableFallback());
   }
 
   requestLock() {
-    this.dom.requestPointerLock();
+    // 玩家点开始 → 游戏从此保持活跃；锁丢失时显示开始画面（可再点恢复）
+    this.started = true;
+    let p;
+    try {
+      p = this.dom.requestPointerLock();
+    } catch (e) {
+      this.enableFallback();
+      return;
+    }
+    // Chrome 对锁定失败有限流：限流拒绝时只 reject Promise，
+    // 不一定触发 pointerlockerror 事件 → 必须直接兜住 rejection
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => this.enableFallback());
+    }
   }
 
-  get active() { return this.locked || this.fallback; }
+  // 进入回退模式（Pointer Lock 不可用）并通知主程序
+  enableFallback() {
+    this.lockRejected = true;
+    this.fallback = true;
+    if (this.onLockChange) this.onLockChange(this.locked);
+  }
+
+  get active() { return this.locked || this.fallback || this.started; }
 
   // 每帧消费输入
   consume() {

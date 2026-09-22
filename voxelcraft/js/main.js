@@ -303,5 +303,10 @@ requestAnimationFrame(frame);
 // 开发/测试钩子（不影响游戏运行；tick 可被外部手动驱动以在无 rAF 环境测试）
 window.__voxelcraft = {
   world, player, camera, scene, dayCycle, input, tick,
-  raycast: (origin, dir) => raycastVoxel(world, origin, dir, PLAYER.REACH),
+  // 兼容 Vector3 与 [x,y,z] 数组两种入参
+  raycast: (origin, dir) => {
+    const o = origin.x !== undefined ? origin : { x: origin[0], y: origin[1], z: origin[2] };
+    const d = dir.x !== undefined ? dir : { x: dir[0], y: dir[1], z: dir[2] };
+    return raycastVoxel(world, o, d, PLAYER.REACH);
+  },
 };

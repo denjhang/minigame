@@ -30,7 +30,9 @@ export class DayCycle {
     scene.add(this.sun.target); // target 每帧指向玩家，保证光照方向正确
     scene.add(new THREE.AmbientLight(0xffffff, 0.4));
     this.ambient = scene.children[scene.children.length - 1];
-    scene.fog = new THREE.Fog(0xcfe8f8, 30, 90);
+    // 雾距离收紧：96 格世界里 near=30/far=90 会让大半场景雾化、
+    // 看起来像半透明方块；15/45 保证近处清晰、远处自然淡出
+    scene.fog = new THREE.Fog(0xcfe8f8, 15, 45);
     // 太阳/月亮指示球
     this.orb = new THREE.Mesh(
       new THREE.SphereGeometry(3, 12, 12),

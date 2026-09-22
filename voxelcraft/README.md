@@ -5,16 +5,17 @@
 
 ## 运行
 
-ES Module 需要 HTTP 环境，任选其一：
+ES Module 需要 HTTP 环境，任选其一（**注意：8000 端口已被本机其他程序占用，请勿使用；默认用 8471**）：
 
 ```bash
 # 方式 1：Python
-python -m http.server 8000 -d voxelcraft
+python -m http.server 8471 -d voxelcraft
 
-# 方式 2：VS Code Live Server 插件，右键 index.html → Open with Live Server
+# 方式 2：VS Code Live Server 插件（可自定义端口），右键 index.html → Open with Live Server
 ```
 
-然后浏览器打开 `http://localhost:8000`，点击画面任意处开始。
+然后浏览器打开 `http://localhost:8471`，点击画面任意处开始。
+若 8471 也被占用，换任意空闲端口即可（如 8500）。
 
 ## 操作
 

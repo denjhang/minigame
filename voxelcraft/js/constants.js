@@ -72,6 +72,8 @@ export const WORLD = {
 export const PLAYER = {
   WALK_SPEED: 4.317,
   SPRINT_SPEED: 5.612,
+  FLY_SPEED: 10,           // 创造模式飞行水平移速（原版约 10 blocks/s）
+  FLY_VERTICAL_SPEED: 10,  // 飞行上升/下降的最大垂直速度
   JUMP_HEIGHT: 1.25,
   GRAVITY_PER_TICK: 0.08,
   TICK_RATE: 20,
@@ -82,8 +84,10 @@ export const PLAYER = {
   REACH: 5,
 };
 
-// v0 = sqrt(2 * g * h)；g = 0.08 * 20² = 32 blocks/s²
-export const JUMP_VY = Math.sqrt(2 * (PLAYER.GRAVITY_PER_TICK * PLAYER.TICK_RATE ** 2) * PLAYER.JUMP_HEIGHT);
+// 起跳初速（blocks/s）。按本引擎的精确离散模型（每 tick：v −= 1.6 后 ×0.98，
+// 位移 = v × 0.05）反推，使跳顶高度恰好 1.25 格：v0 ≈ 10.05
+// （连续近似 sqrt(2·g·h)=8.944 在此离散模型下只能跳到约 1.0 格，偏低）
+export const JUMP_VY = 10.05;
 
 export const DAY_CYCLE = {
   SECONDS: 1200,        // 一天 20 分钟 = 24000 ticks（原版）

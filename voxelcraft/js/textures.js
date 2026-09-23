@@ -251,8 +251,10 @@ export function buildAtlas() {
   ctx.putImageData(new ImageData(data, W, H), 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
   tex.magFilter = THREE.NearestFilter;   // 像素风
-  tex.minFilter = THREE.NearestMipmapLinearFilter;
-  tex.generateMipmaps = true;
+  tex.minFilter = THREE.NearestFilter;   // 禁用 mipmap：图集只有一行，mipmap 会跨图块
+  tex.generateMipmaps = false;           // 平均像素，把水/玻璃的 alpha 混进不透明图块，
+  // （不透明材质也会把纹理 alpha 写入画布帧缓冲，浏览器按预乘 alpha 合成，
+  //   导致远处大量方块呈半透明）
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.flipY = true; // 默认；配合 uv 计算
   return tex;

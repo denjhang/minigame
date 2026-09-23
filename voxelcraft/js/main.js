@@ -24,7 +24,14 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 400);
 
 const atlas = buildAtlas();
+// 不透明方块（草/土/石/木/沙/砖/树叶）
 const opaqueMat = new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true });
+// 玻璃：镂空（中间透明、白框可见），用 alphaTest 而非 transparent，
+// 避免整块半透明和排序问题
+const glassMat = new THREE.MeshLambertMaterial({
+  map: atlas, vertexColors: true, alphaTest: 0.5, side: THREE.DoubleSide,
+});
+// 水：唯一的半透明材质
 const waterMat = new THREE.MeshLambertMaterial({
   map: atlas, vertexColors: true, transparent: true, opacity: 0.75,
   depthWrite: false, side: THREE.DoubleSide,
@@ -40,7 +47,7 @@ world.generate(20260922);
 const CHUNK = 16;
 const CHUNKS_X = WORLD.SIZE_X / CHUNK;
 const CHUNKS_Z = WORLD.SIZE_Z / CHUNK;
-const chunkMeshes = new Map(); // "cx,cz" → { solid, water, version }
+const chunkMeshes = new Map(); // "cx,cz" → { solid, glass, water, version }
 
 function chunkKey(cx, cz) { return cx + ',' + cz; }
 
@@ -48,20 +55,22 @@ function rebuildChunk(cx, cz) {
   const key = chunkKey(cx, cz);
   const old = chunkMeshes.get(key);
   if (old) {
-    for (const m of [old.solid, old.water]) {
+    for (const m of [old.solid, old.glass, old.water]) {
       if (m) { scene.remove(m); m.geometry.dispose(); }
     }
   }
-  const geoSolid = buildChunkGeometry(world, cx, cz, true);
-  const geoWater = buildChunkGeometry(world, cx, cz, false);
-  const entry = { version: world.version, solid: null, water: null };
-  if (geoSolid) {
-    entry.solid = new THREE.Mesh(geoSolid, opaqueMat);
-    scene.add(entry.solid);
-  }
-  if (geoWater) {
-    entry.water = new THREE.Mesh(geoWater, waterMat);
-    scene.add(entry.water);
+  // 三层分别生成：不透明 / 玻璃 / 水，各自绑定对应材质
+  const layers = [
+    ['solid', opaqueMat],
+    ['glass', glassMat],
+    ['water', waterMat],
+  ];
+  const entry = { version: world.version, solid: null, glass: null, water: null };
+  for (const [name, mat] of layers) {
+    const geo = buildChunkGeometry(world, cx, cz, name);
+    if (!geo) continue;
+    entry[name] = new THREE.Mesh(geo, mat);
+    scene.add(entry[name]);
   }
   chunkMeshes.set(key, entry);
 }
@@ -96,6 +105,10 @@ const player = new Player(world);
 player.pos.set(spawn.x, spawn.y, spawn.z);
 let yaw = 0, pitch = 0;
 player.yaw = yaw;
+// 双击跳跃键检测（切换飞行）
+let lastJumpPress = 0;
+let wasJump = false;
+const renderPos = new THREE.Vector3(); // 玩家插值位置（相机跟随时用）
 
 // ---------------- 目标高亮框 ----------------
 const highlight = new THREE.LineSegments(
@@ -216,10 +229,36 @@ function tick(now) {
     const mag = Math.hypot(fwd, str);
     player.input(mag > 1 ? fwd / mag : fwd, mag > 1 ? str / mag : str, inp.sprint, dt);
 
-    // 跳跃 / 游泳
-    if (inp.jump) {
-      if (player.inWater) player.vel.y = Math.max(player.vel.y, 2.8);
+    // 双击跳跃键（250ms 内两次按下）→ 切换飞行。必须在跳跃处理之前判断，
+    // 否则第二次按下会先触发一次地面起跳
+    const jumpPressed = inp.jump && !wasJump;
+    let toggledFly = false;
+    if (jumpPressed) {
+      if (now - lastJumpPress < 250) {
+        player.setFlying(!player.flying);
+        toggledFly = true;
+        flashMsg(player.flying
+          ? '飞行已开启：Space 上升 / Shift 下降，再双击 Space 关闭'
+          : '飞行已关闭');
+        lastJumpPress = 0;
+      } else {
+        lastJumpPress = now;
+      }
+    }
+    wasJump = inp.jump;
+
+    // 跳跃 / 游泳 / 飞行（原版创造模式，minecraft.wiki）：
+    //   双击跳跃键切换飞行；飞行中 Space 上升、Shift 下降；
+    //   水中 Space 上浮、Shift 下潜；否则 Space 跳跃
+    player.flyUp = player.flyDown = player.swimUp = player.swimDown = false;
+    if (inp.jump && !toggledFly) {
+      if (player.flying) player.flyUp = true;
+      else if (player.inWater) player.swimUp = true;
       else player.jump();
+    }
+    if (inp.sneak) {
+      if (player.flying) player.flyDown = true;
+      else if (player.inWater) player.swimDown = true;
     }
     player.update(dt);
     // 掉出世界底部 → 回出生点
@@ -262,8 +301,10 @@ function tick(now) {
 
     if (inp.clickRight && t) doPlace(t);
 
-    // 相机跟随（yaw=0 朝 -Z，与移动向量一致）
-    camera.position.set(player.pos.x, player.pos.y + PLAYER.EYE, player.pos.z);
+    // 相机跟随（yaw=0 朝 -Z，与移动向量一致）。
+    // 物理固定 20Hz，用插值位置让画面在高刷新率下依然顺滑
+    player.renderPos(renderPos);
+    camera.position.set(renderPos.x, renderPos.y + PLAYER.EYE, renderPos.z);
     camera.rotation.set(0, 0, 0);
     camera.rotateY(-yaw);
     camera.rotateX(pitch);

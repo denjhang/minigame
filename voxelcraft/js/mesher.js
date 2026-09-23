@@ -46,8 +46,12 @@ function faceAxes(face) {
 // AO 值：0,1,2,3 → 亮度
 const AO_LIGHT = [0.45, 0.65, 0.85, 1.0];
 
-// waterOnly=true 时只生成水面几何（用透明材质渲染），否则只生成不透明方块面
-export function buildChunkGeometry(world, cx, cz, waterOnly = false) {
+// 分层网格化：世界拆成 3 层，各层用不同材质渲染
+//   'solid' → 不透明方块（草/土/石/木/沙/砖/树叶…），不透明材质
+//   'glass' → 玻璃，镂空材质（alphaTest，保留白框、中间透空，同原版）
+//   'water' → 水，独立半透明材质（顶面下沉 0.12）
+// 注意：水面/玻璃的透明性由「材质」体现，不能反过来把它们塞进不透明层
+export function buildChunkGeometry(world, cx, cz, layer = 'solid') {
   const { SX, SZ, SY } = world;
   const x0 = cx * 16, z0 = cz * 16;
   const x1 = Math.min(x0 + 16, SX), z1 = Math.min(z0 + 16, SZ);
@@ -63,14 +67,19 @@ export function buildChunkGeometry(world, cx, cz, waterOnly = false) {
     return b !== BLOCK.AIR && b !== BLOCK.WATER && BLOCK_DEFS[b].opaque;
   };
 
+  // 该方块是否属于当前层
+  const inLayer = (id) => {
+    if (id === BLOCK.AIR) return false;
+    if (id === BLOCK.WATER) return layer === 'water';
+    if (id === BLOCK.GLASS) return layer === 'glass';
+    return layer === 'solid' && BLOCK_DEFS[id].solid;
+  };
+
   for (let y = 0; y < SY; y++)
     for (let z = z0; z < z1; z++)
       for (let x = x0; x < x1; x++) {
         const id = world.get(x, y, z);
-        if (id === BLOCK.AIR) continue;
-        if (waterOnly ? id !== BLOCK.WATER : id === BLOCK.WATER) continue;
-        const def = BLOCK_DEFS[id];
-        if (!def.solid && id !== BLOCK.WATER) continue;
+        if (!inLayer(id)) continue;
 
         for (let f = 0; f < 6; f++) {
           const face = FACES[f];
@@ -94,12 +103,21 @@ export function buildChunkGeometry(world, cx, cz, waterOnly = false) {
     const face = FACES[f];
     const def = BLOCK_DEFS[id];
     const nx = x + face.n[0], ny = y + face.n[1], nz = z + face.n[2];
-    // 水面顶面降低 0.12（水不占满格）
+    // 水面顶面降低 0.12（原版水不占满整格，海面略低于方块顶）
     const isWaterTop = id === BLOCK.WATER && face.n[1] === 1;
+    // 水面侧的竖直面：若本格水上方不是水（即这里是水体表面），
+    // 把「顶边」也下沉 0.12，否则岸边会露出 0.12 格高的水墙
+    const surfaceWaterSide = id === BLOCK.WATER && face.n[1] === 0 &&
+      world.getRaw(x, y + 1, z) !== BLOCK.WATER;
     const page = def.faces[face.n[1] === 1 ? 0 : face.n[1] === -1 ? 1 : 2];
     const tile = tileUV(TILE_INDEX[page]);
-    const base = isWaterTop ? 0.88 : 0;
-    const verts = face.c.map(([cx2, cy2, cz2]) => [x + cx2, y + cy2 + base, z + cz2]);
+    // 下沉要减：写 +0.88 会把海面抬到方块顶之上 0.88 格
+    const base = isWaterTop ? -0.12 : 0;
+    const verts = face.c.map(([cx2, cy2, cz2]) => {
+      // 水面侧面的顶边（cy2 === 1）跟随水面一起下沉
+      const dy = (surfaceWaterSide && cy2 === 1) ? -0.12 : 0;
+      return [x + cx2, y + cy2 + base + dy, z + cz2];
+    });
 
     // 计算 4 角 AO
     const { axU, sxU, axV, sxV } = faceAxes(face);

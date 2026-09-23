@@ -18,7 +18,10 @@ export class Input {
     this.selected = 0;   // 热键栏选中项 0-8
     this.onLockChange = onLockChange;
 
-    const active = () => this.locked || this.fallback;
+    // 只要玩家点过开始就接受输入：Pointer Lock 是异步的，且部分环境会
+    // reject Promise 后才走 fallback；若这里只看 locked/fallback，
+    // 点开始到锁生效之间的按键/点击会被静默丢弃
+    const active = () => this.locked || this.fallback || this.started;
 
     document.addEventListener('keydown', (e) => {
       if (!active()) return;
@@ -98,6 +101,7 @@ export class Input {
       strafe: (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0),
       sprint: this.keys.has('ControlLeft') || this.keys.has('KeyX'),
       jump: this.keys.has('Space'),
+      sneak: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
       mouseDX: this.mouseDX,
       mouseDY: this.mouseDY,
       clickLeft: this.clickLeft,

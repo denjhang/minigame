@@ -1,0 +1,12 @@
+# Windows 误生成的保留名文件
+nul
+
+# 依赖与构建产物
+node_modules/
+dist/
+__pycache__/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log

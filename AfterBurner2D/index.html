@@ -1,0 +1,1454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sky Striker 3D</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a1420; overflow: hidden; }
+  #wrap { position: relative; width: 100%; height: 100%; }
+  #hud {
+    position: absolute; left: 18px; top: 14px; z-index: 10;
+    font: 700 16px/1.7 "Consolas", monospace; color: #eaf6ff;
+    text-shadow: 0 0 6px rgba(0,180,255,.5), 0 1px 2px rgba(0,0,0,.9);
+    user-select: none; pointer-events: none; white-space: pre;
+    background: linear-gradient(180deg, rgba(4,18,32,.55), rgba(4,18,32,.25));
+    border-left: 3px solid rgba(0,190,255,.55);
+    padding: 8px 14px; border-radius: 0 8px 8px 0;
+  }
+  #msg {
+    position: absolute; left: 50%; top: 36%; transform: translate(-50%,-50%);
+    z-index: 11; font: 700 26px/1.5 "Consolas", monospace; color: #fff;
+    text-shadow: 0 2px 10px rgba(0,0,0,.7); text-align: center; user-select: none;
+    pointer-events: none; white-space: pre;
+  }
+  #lockbox {
+    position: absolute; left: 50%; top: 52%; width: 46px; height: 46px;
+    margin: -23px 0 0 -23px; z-index: 9; display: none;
+    border: 2px solid #ff5555; box-shadow: 0 0 8px rgba(255,60,60,.6);
+    user-select: none; pointer-events: none;
+  }
+  #lockbox small {
+    position: absolute; top: -20px; width: 100%; text-align: center;
+    font: 700 12px "Consolas", monospace; color: #ff8888;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud"></div>
+  <div id="msg"></div>
+  <div id="lockbox"><small>LOCK</small></div>
+</div>
+<script src="three.min.js"></script>
+<script>
+"use strict";
+// =====================================================================
+// Sky Striker 3D —— 现代 3D 空战
+// 场景：渐变天空 + 太阳 + 云 + 海洋 + 岛屿（陆地/山/树/房子/河流）
+//       航空母舰 + 玩家战机 + 敌机 + 机枪/锁定导弹 + 补给机
+// 视角：第三人称后置追机镜头
+// =====================================================================
+
+// ---------- 状态机 ----------
+let STATE = "TITLE";   // TITLE -> TAKEOFF -> PLAYING -> GAMEOVER
+
+// ---------- 渲染器/相机 ----------
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0xcfe3f2, 0.00038);
+const camera = new THREE.PerspectiveCamera(64, 1, 0.5, 9000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById("wrap").appendChild(renderer.domElement);
+
+// ---------- 天空（渐变球：天顶蓝 → 地平线暖白） ----------
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(7000, 32, 20),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false,
+    uniforms: {
+      top:     { value: new THREE.Color(0x1e63b8) },
+      mid:     { value: new THREE.Color(0x6fa8d8) },
+      horizon: { value: new THREE.Color(0xe8f1f5) },
+    },
+    vertexShader: `varying vec3 vP; void main(){ vP=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
+    fragmentShader: `
+      uniform vec3 top,mid,horizon; varying vec3 vP;
+      void main(){
+        float h = normalize(vP).y;
+        vec3 c = mix(horizon, mid, smoothstep(0.,0.22,clamp(h,0.,1.)));
+        c = mix(c, top, smoothstep(0.22,0.7,clamp(h,0.,1.)));
+        gl_FragColor = vec4(c,1.);
+      }`,
+  })
+);
+sky.frustumCulled = false;
+scene.add(sky);
+
+// ---------- 太阳（发光圆盘 + 光晕） ----------
+const sunDir = new THREE.Vector3(0.55, 0.42, -0.72).normalize();
+const sunMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(180, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0xfff3c0, fog: false })
+);
+sunMesh.position.copy(sunDir).multiplyScalar(6000);
+scene.add(sunMesh);
+const sunGlow = new THREE.Mesh(
+  new THREE.SphereGeometry(340, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0xfff8dc, transparent: true, opacity: 0.28, fog: false })
+);
+sunGlow.position.copy(sunMesh.position);
+scene.add(sunGlow);
+
+// ---------- 光照 ----------
+const sunLight = new THREE.DirectionalLight(0xfff0d0, 1.5);
+sunLight.position.copy(sunDir).multiplyScalar(1000);
+scene.add(sunLight);
+scene.add(new THREE.HemisphereLight(0xbddcf0, 0x3a6a8a, 0.7)); // 天光/海反光
+
+// ---------- 海洋 ----------
+const ocean = new THREE.Mesh(
+  new THREE.PlaneGeometry(40000, 40000),
+  new THREE.MeshLambertMaterial({ color: 0x2a6d99 })
+);
+ocean.rotation.x = -Math.PI / 2;
+ocean.position.y = 0;
+scene.add(ocean);
+
+// ---------- 云（蓬松的球团，缓慢漂移） ----------
+const clouds = [];
+function makeCloud(x, y, z) {
+  const c = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 });
+  const n = 4 + (Math.random() * 4 | 0);
+  for (let i = 0; i < n; i++) {
+    const s = 28 + Math.random() * 40;
+    const p = new THREE.Mesh(new THREE.SphereGeometry(s, 8, 6), mat);
+    p.position.set((Math.random() - 0.5) * s * 2.4, (Math.random() - 0.5) * s * 0.7, (Math.random() - 0.5) * s * 1.6);
+    p.scale.y = 0.55;
+    c.add(p);
+  }
+  c.position.set(x, y, z);
+  scene.add(c);
+  clouds.push(c);
+}
+for (let i = 0; i < 14; i++) {
+  makeCloud((Math.random() - 0.5) * 4000, 260 + Math.random() * 220, (Math.random() - 0.5) * 4000);
+}
+
+// ---------- 岛屿生成（陆地 + 山 + 树 + 房子 + 河流） ----------
+const islands = [];
+const treeMat = new THREE.MeshLambertMaterial({ color: 0x2d6b3a, flatShading: true });
+const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b4a2a });
+const houseMat = new THREE.MeshLambertMaterial({ color: 0xd8c8a8, flatShading: true });
+const roofMat = new THREE.MeshLambertMaterial({ color: 0x8a4a3a, flatShading: true });
+const rockMat = new THREE.MeshLambertMaterial({ color: 0x7a7f85, flatShading: true });
+const sandMat = new THREE.MeshLambertMaterial({ color: 0xd8c89a });
+const grassMat = new THREE.MeshLambertMaterial({ color: 0x4a8a55 });
+
+function makeIsland(cx, cz, size) {
+  const isl = new THREE.Group();
+  // 沙滩环岛
+  const beach = new THREE.Mesh(new THREE.CylinderGeometry(size * 1.15, size * 1.25, 6, 10), sandMat);
+  beach.position.y = 2;
+  isl.add(beach);
+  // 草地主体
+  const land = new THREE.Mesh(new THREE.CylinderGeometry(size, size * 1.1, 8, 10), grassMat);
+  land.position.y = 3;
+  isl.add(land);
+  // 山脉（2~4 座圆锥）
+  const nMtn = 2 + (Math.random() * 3 | 0);
+  for (let i = 0; i < nMtn; i++) {
+    const h = 40 + Math.random() * size * 0.9;
+    const r = h * 0.55;
+    const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 7), rockMat);
+    const a = Math.random() * Math.PI * 2, d = Math.random() * size * 0.5;
+    m.position.set(cx + Math.sin(a) * d, h / 2 + 6, cz + Math.cos(a) * d);
+    isl.add(m);
+    // 山顶积雪
+    if (h > 80) {
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.35, h * 0.22, 7),
+        new THREE.MeshLambertMaterial({ color: 0xf0f5f8 }));
+      cap.position.set(m.position.x, m.position.y + h * 0.39, m.position.z);
+      isl.add(cap);
+    }
+  }
+  // 树林
+  const nTree = 8 + (size / 20 | 0);
+  for (let i = 0; i < nTree; i++) {
+    const a = Math.random() * Math.PI * 2, d = Math.random() * size * 0.85;
+    const x = cx + Math.sin(a) * d, z = cz + Math.cos(a) * d;
+    const th = 6 + Math.random() * 9;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 1.0, th * 0.4, 5), trunkMat);
+    trunk.position.set(x, th * 0.2 + 7, z);
+    const crown = new THREE.Mesh(new THREE.ConeGeometry(th * 0.42, th, 6), treeMat);
+    crown.position.set(x, th * 0.4 + 7 + th * 0.5, z);
+    isl.add(trunk, crown);
+  }
+  // 小房子（2~5 栋，带屋顶）
+  const nHouse = 2 + (Math.random() * 4 | 0);
+  for (let i = 0; i < nHouse; i++) {
+    const a = Math.random() * Math.PI * 2, d = Math.random() * size * 0.6;
+    const x = cx + Math.sin(a) * d, z = cz + Math.cos(a) * d;
+    const hs = 5 + Math.random() * 4;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(hs, hs * 0.8, hs), houseMat);
+    body.position.set(x, hs * 0.4 + 7, z);
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(hs * 0.85, hs * 0.6, 4), roofMat);
+    roof.rotation.y = Math.PI / 4;
+    roof.position.set(x, hs * 0.8 + 7 + hs * 0.3, z);
+    isl.add(body, roof);
+  }
+  // 河流（从岛中心蜿蜒到海里的亮色带）
+  if (Math.random() < 0.6) {
+    const river = new THREE.Mesh(new THREE.BoxGeometry(6, 0.4, size * 1.4),
+      new THREE.MeshLambertMaterial({ color: 0x3a8ab8 }));
+    river.position.set(cx + (Math.random() - 0.5) * size * 0.5, 7.2, cz + size * 0.3);
+    river.rotation.y = Math.random() * 0.8 - 0.4;
+    isl.add(river);
+  }
+  isl.position.set(0, 0, 0);
+  scene.add(isl);
+  const islData = { g: isl, cx, cz, size, groundY: 7, peaks: [] };
+  // 记录山峰碰撞体（山是主要撞击物，树/房子太矮忽略）
+  islData.peaks = isl.children
+    .filter(c => c.geometry && c.geometry.type === "ConeGeometry" && c.position.y > 30)
+    .map(c => ({ x: c.position.x, y: c.position.y, z: c.position.z, h: c.geometry.parameters.height, r: c.geometry.parameters.radiusTop * 0.7 }));
+  islands.push(islData);
+  return isl;
+}
+// 初始岛屿分布（玩家出生点周围 + 远处）
+const islandSpots = [
+  [1400, -2600, 420], [-1800, -3200, 520], [2600, -4400, 380],
+  [-2400, -5200, 600], [800, -6400, 460], [-900, -8200, 540],
+  [2200, -9600, 400], [-2600, -11000, 560],
+  [500, -1800, 300],   // 起飞点附近（离航母 2km，不压航母）
+  [-1500, -1500, 260],
+];
+for (const [x, z, s] of islandSpots) makeIsland(x, z, s);
+
+// ---------- 航空母舰（起飞平台） ----------
+const carrier = new THREE.Group();
+{
+  const hullMat = new THREE.MeshLambertMaterial({ color: 0x5a6a78, flatShading: true });
+  const deckMat = new THREE.MeshLambertMaterial({ color: 0x9aa8b5 });
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(34, 12, 190), hullMat);
+  hull.position.y = -6;
+  const bow = new THREE.Mesh(new THREE.ConeGeometry(17, 34, 4), hullMat);
+  bow.rotation.x = -Math.PI / 2; bow.rotation.y = Math.PI / 4;
+  bow.position.set(0, -6, 112);
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(38, 1.4, 200), deckMat);
+  deck.position.y = 0.5;
+  const islandTower = new THREE.Mesh(new THREE.BoxGeometry(7, 14, 22), new THREE.MeshLambertMaterial({ color: 0x6a7a8a }));
+  islandTower.position.set(12, 9, 40);
+  // 甲板中线
+  const line = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.06, 90), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  line.position.set(-8, 1.25, -10);
+  carrier.add(hull, bow, deck, islandTower, line);
+  // 甲板上的舰载机剪影（装饰）
+  for (const [dx, dz] of [[-14, 60], [14, 70]]) {
+    const parked = buildFighter(0x3a5a7a, false);
+    parked.scale.setScalar(0.75);
+    parked.position.set(dx, 1.5, dz);
+    carrier.add(parked);
+  }
+}
+carrier.position.set(-30, 0, 60);
+scene.add(carrier);
+
+// ---------- 战斗机建模（真飞机造型：机身/机翼/尾翼/发动机/座舱） ----------
+function buildFighter(color, isPlayer) {
+  const g = new THREE.Group();
+  const body = new THREE.MeshLambertMaterial({ color, flatShading: true });
+  const dark = new THREE.MeshLambertMaterial({ color: new THREE.Color(color).multiplyScalar(0.5), flatShading: true });
+  const glass = new THREE.MeshLambertMaterial({ color: 0x88c8e8, emissive: 0x1a3a4a });
+
+  // 机身（流线型：前锥 + 中筒 + 尾锥）
+  const mid = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 1.0, 9, 12), body);
+  mid.rotation.x = Math.PI / 2;
+  g.add(mid);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.85, 3.2, 12), body);
+  nose.rotation.x = -Math.PI / 2;
+  nose.position.z = -6;
+  g.add(nose);
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(1.0, 3.0, 12), body);
+  tail.rotation.x = Math.PI / 2;
+  tail.position.z = 6;
+  g.add(tail);
+  // 机头空速管
+  const pitot = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.2, 4), dark);
+  pitot.rotation.x = Math.PI / 2;
+  pitot.position.set(0, 0.15, -8.2);
+  g.add(pitot);
+  // 座舱盖
+  const cab = new THREE.Mesh(new THREE.SphereGeometry(0.7, 10, 8), glass);
+  cab.scale.set(1, 0.75, 1.7);
+  cab.position.set(0, 0.85, -1.6);
+  g.add(cab);
+  // 主翼（后掠）
+  const wingGeo = new THREE.BoxGeometry(6.8, 0.22, 3.8);
+  const wingL = new THREE.Mesh(wingGeo, body);
+  wingL.position.set(-4.4, 0.1, 1.2);
+  wingL.rotation.y = 0.3;
+  wingL.name = "wingL";
+  const wingR = new THREE.Mesh(wingGeo, body);
+  wingR.position.set(4.4, 0.1, 1.2);
+  wingR.rotation.y = -0.3;
+  wingR.name = "wingR";
+  g.add(wingL, wingR);
+  // 翼尖挂架（导弹挂载点）
+  for (const sx of [-7.6, 7.6]) {
+    const rack = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1.4, 6), dark);
+    rack.position.set(sx, -0.6, 1.2);
+    g.add(rack);
+  }
+  // 水平尾翼
+  for (const sx of [-1, 1]) {
+    const htail = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.16, 1.6), body);
+    htail.position.set(sx * 1.8, 0.3, 5.4);
+    htail.rotation.y = sx * 0.25;
+    g.add(htail);
+  }
+  // 垂尾（单垂尾，后掠）
+  const vtail = new THREE.Mesh(new THREE.BoxGeometry(0.24, 2.6, 2.0), body);
+  vtail.position.set(0, 1.6, 5.6);
+  vtail.rotation.x = -0.18;
+  g.add(vtail);
+  // 发动机喷口
+  const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.65, 1.0, 10),
+    new THREE.MeshLambertMaterial({ color: 0x2a2a2a }));
+  nozzle.rotation.x = Math.PI / 2;
+  nozzle.position.set(0, 0, 7.6);
+  g.add(nozzle);
+  // 发动机舱（机身两侧鼓包）
+  for (const sx of [-1, 1]) {
+    const eng = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.1, 3.4), dark);
+    eng.position.set(sx * 0.9, -0.5, 4.6);
+    g.add(eng);
+  }
+  // 发动机尾焰（加力时由 updateEngineFlames 放大）
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.4, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff9a3a, transparent: true, opacity: 0.85 }));
+  flame.rotation.x = Math.PI / 2;
+  flame.position.set(0, 0, 9.2);
+  flame.name = "engineFlame";
+  g.add(flame);
+  g.userData.wingL = wingL;
+  g.userData.wingR = wingR;
+  return g;
+}
+// 所有飞机的尾焰随速度/加力伸缩
+const allFighters = () => [player, ...enemies];
+function updateEngineFlames(dt) {
+  for (const f of allFighters()) {
+    const flame = f.getObjectByName("engineFlame");
+    if (!flame) continue;
+    // 玩家用 P 的速度，敌机用其朝向变化估算（用固定巡航值）
+    const spd = f === player ? P.speed : 45;
+    const ab = f === player ? P.afterburn : 0;
+    const s = 0.5 + (spd / 135) * 0.9 + (ab > 0 ? 0.9 : 0);
+    flame.scale.set(1, s, 1);
+    flame.material.opacity = Math.min(1, 0.4 + s * 0.4);
+  }
+}
+const player = buildFighter(0x3a6a9a, true);
+scene.add(player);
+
+// ---------- 敌机 ----------
+const enemies = [];
+const enemyColors = [0x8a3a2a, 0x3a4a8a, 0x7a6a2a, 0x4a7a3a];
+function spawnEnemy(type) {
+  const e = buildFighter(enemyColors[(Math.random() * enemyColors.length) | 0], false);
+  e.userData.type = type;
+  e.userData.hp = type === "tail" ? 3 : 2;
+  e.userData.firing = 0;
+  e.userData.missileCd = 3 + Math.random() * 3;
+  e.userData.weave = Math.random() * Math.PI * 2;
+  // 相对玩家生成
+  const fx = -Math.sin(P.heading), fz = -Math.cos(P.heading);
+  const sx = -Math.cos(P.heading), sz = Math.sin(P.heading);
+  let px, py, pz;
+  const r = () => Math.random() - 0.5;
+  if (type === "head") {
+    px = P.pos.x + fx * (650 + Math.random() * 350) + sx * r() * 260;
+    pz = P.pos.z + fz * (650 + Math.random() * 350) + sz * r() * 260;
+    py = Math.max(20, P.pos.y + r() * 160);
+  } else if (type === "tail") {
+    px = P.pos.x - fx * 300 + sx * (r() < 0 ? 240 : -240);
+    pz = P.pos.z - fz * 300 + sz * (r() < 0 ? 240 : -240);
+    py = Math.max(20, P.pos.y + r() * 100);
+  } else {
+    const sd = r() < 0 ? 1 : -1;
+    px = P.pos.x + fx * 320 + sx * sd * 200;
+    pz = P.pos.z + fz * 320 + sz * sd * 200;
+    py = Math.max(20, P.pos.y + r() * 100);
+  }
+  e.position.set(px, py, pz);
+  scene.add(e);
+  enemies.push(e);
+  return e;
+}
+
+// ---------- 武器 ----------
+const playerBullets = [], enemyBullets = [], playerMissiles = [], enemyMissiles = [], explosions = [];
+const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffe08a });
+const eBulletMat = new THREE.MeshBasicMaterial({ color: 0xff6a4a });
+const missileMat = new THREE.MeshBasicMaterial({ color: 0xff8a3a });
+
+function fireCannon() {
+  for (const sx of [-2.4, 2.4]) {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.5, 6, 5), bulletMat);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(player.quaternion);
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+    b.position.copy(player.position).addScaledVector(right, sx).addScaledVector(fwd, 5);
+    b.userData = { vel: fwd.clone().multiplyScalar(300).addScaledVector(right, sx * 0.2), life: 2.0 };
+    scene.add(b);
+    playerBullets.push(b);
+  }
+  cannonCd = 0.09;
+  sfxGun();
+}
+
+// 导弹建模（玩家/敌方共用）：白色弹体 + 深色尾翼 + 橙色头锥 + 尾焰
+const missileBodyMat = new THREE.MeshLambertMaterial({ color: 0xe8e8e0 });
+const missileFinMat = new THREE.MeshLambertMaterial({ color: 0x444a52 });
+const missileTipMat = new THREE.MeshLambertMaterial({ color: 0xff6a2a });
+const flameMat = new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.9 });
+function buildMissileMesh() {
+  const m = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 2.6, 8), missileBodyMat);
+  body.rotation.x = Math.PI / 2;
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.7, 8), missileTipMat);
+  tip.rotation.x = -Math.PI / 2;
+  tip.position.z = -1.65;
+  // 四片尾翼（绕弹体径向均布）
+  for (let i = 0; i < 4; i++) {
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.7, 0.55), missileFinMat);
+    fin.position.y = 0.55;
+    const pivot = new THREE.Group();
+    pivot.add(fin);
+    pivot.rotation.z = (Math.PI / 2) * i;
+    pivot.position.z = 1.1;
+    m.add(pivot);
+  }
+  // 尾焰（火焰锥，朝后方）
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.34, 1.4, 8), flameMat);
+  flame.rotation.x = Math.PI / 2;
+  flame.position.z = 2.3;
+  flame.name = "flame";
+  m.add(body, tip, flame);
+  return m;
+}
+
+function fireMissile() {
+  if (missiles <= 0) { flashMsg("MISSILES EMPTY", 900); return false; }
+  missiles--;
+  const m = buildMissileMesh();
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(player.quaternion);
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+  m.position.copy(player.position).addScaledVector(right, 2.4).addScaledVector(fwd, 5);
+  m.quaternion.copy(player.quaternion);
+  m.userData = { vel: fwd.clone().multiplyScalar(130).addScaledVector(right, 0.6), life: 7, target: lockTarget, turn: 3.2 };
+  scene.add(m);
+  playerMissiles.push(m);
+  sfxMissile();
+  return true;
+}
+
+function spawnEnemyMissile(e) {
+  const m = buildMissileMesh();
+  m.scale.setScalar(0.85);
+  m.position.copy(e.position);
+  const dir = P.pos.clone().sub(e.position).normalize();
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), dir);
+  m.userData = { vel: dir.multiplyScalar(85), life: 9, lock: 0 };
+  scene.add(m);
+  enemyMissiles.push(m);
+  sfxMissile();
+}
+
+// ---------- 音效（WebAudio 程序化合成，离线可用） ----------
+let actx = null, masterGain = null, engineGain = null, engineFilter = null, engineOsc = null;
+const _panner = new THREE.Object3D();
+function audioInit() {
+  if (actx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  actx = new AC();
+  masterGain = actx.createGain();
+  masterGain.gain.value = 0.55;
+  masterGain.connect(actx.destination);
+}
+function audioResume() {
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function sfxPos(pos) { // 返回距玩家距离（用于衰减，避免立体声定位开销）
+  _panner.position.copy(pos);
+  const d = _panner.position.distanceTo(P.pos);
+  const att = 1 / (1 + Math.max(0, d - 20) / 55);
+  return { d, att: 0.2 + 0.8 * att };
+}
+function _env(g, t0, a, peak, sus, susT, rel) {
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.linearRampToValueAtTime(peak, t0 + a);
+  if (susT > 0) g.gain.setTargetAtTime(sus, t0 + a, 0.08);
+  g.gain.setTargetAtTime(0.0001, t0 + (susT || a), rel);
+}
+function sfxGun() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator();
+  o.type = "sawtooth"; o.frequency.value = 150 + Math.random() * 45;
+  const f = actx.createBiquadFilter();
+  f.type = "lowpass"; f.frequency.value = 1900; f.Q.value = 0.7;
+  const g = actx.createGain();
+  o.connect(f); f.connect(g); g.connect(masterGain);
+  _env(g, t, 0.004, 0.5, 0, 0, 0.045);
+  o.start(t); o.stop(t + 0.07);
+  const nb = actx.createBufferSource();
+  nb.buffer = noiseBuf(0.06);
+  const nf = actx.createBiquadFilter();
+  nf.type = "highpass"; nf.frequency.value = 1100;
+  const ng = actx.createGain();
+  nb.connect(nf); nf.connect(ng); ng.connect(masterGain);
+  _env(ng, t, 0.002, 0.22, 0, 0, 0.03);
+  nb.start(t); nb.stop(t + 0.06);
+}
+let _noiseCache = null;
+function noiseBuf(sec) {
+  const len = Math.max(1, (actx.sampleRate * sec) | 0);
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  return buf;
+}
+function sfxMissile() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator();
+  o.type = "sawtooth";
+  o.frequency.setValueAtTime(300, t);
+  o.frequency.exponentialRampToValueAtTime(70, t + 0.55);
+  const g = actx.createGain();
+  o.connect(g); g.connect(masterGain);
+  _env(g, t, 0.01, 0.3, 0, 0.3, 0.25);
+  o.start(t); o.stop(t + 0.6);
+  const nb = actx.createBufferSource();
+  nb.buffer = noiseBuf(0.7);
+  const nf = actx.createBiquadFilter();
+  nf.type = "bandpass"; nf.frequency.value = 1000; nf.Q.value = 0.8;
+  const ng = actx.createGain();
+  nb.connect(nf); nf.connect(ng); ng.connect(masterGain);
+  _env(ng, t, 0.01, 0.16, 0, 0.35, 0.3);
+  nb.start(t); nb.stop(t + 0.7);
+}
+function sfxExplosion(big, pos) {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const a = sfxPos(pos || P.pos).att;
+  const nb = actx.createBufferSource();
+  nb.buffer = noiseBuf(big ? 1.1 : 0.5);
+  const lp = actx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(big ? 1500 : 2200, t);
+  lp.frequency.exponentialRampToValueAtTime(70, t + (big ? 0.9 : 0.45));
+  const g = actx.createGain();
+  nb.connect(lp); lp.connect(g); g.connect(masterGain);
+  _env(g, t, 0.01, big ? 0.95 : 0.5, 0, big ? 0.5 : 0.25, big ? 0.4 : 0.2);
+  nb.start(t); nb.stop(t + (big ? 1.1 : 0.5));
+  const o = actx.createOscillator();
+  o.type = "sine";
+  o.frequency.setValueAtTime(big ? 130 : 90, t);
+  o.frequency.exponentialRampToValueAtTime(34, t + (big ? 0.6 : 0.35));
+  const g2 = actx.createGain();
+  o.connect(g2); g2.connect(masterGain);
+  _env(g2, t, 0.01, big ? 0.7 : 0.35, 0, 0, big ? 0.5 : 0.3);
+  o.start(t); o.stop(t + (big ? 0.7 : 0.4));
+}
+function sfxLock(on) {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator();
+  o.type = "sine"; o.frequency.value = on ? 1150 : 700;
+  const g = actx.createGain();
+  o.connect(g); g.connect(masterGain);
+  _env(g, t, 0.005, 0.22, 0, 0, 0.09);
+  o.start(t); o.stop(t + 0.12);
+}
+function sfxResupply() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  [660, 880, 1100].forEach((fr, i) => {
+    const o = actx.createOscillator();
+    o.type = "triangle"; o.frequency.value = fr;
+    const g = actx.createGain();
+    o.connect(g); g.connect(masterGain);
+    _env(g, t + i * 0.09, 0.01, 0.28, 0, 0, 0.1);
+    o.start(t + i * 0.09); o.stop(t + i * 0.09 + 0.14);
+  });
+}
+function sfxStage() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  [520, 660].forEach((fr, i) => {
+    const o = actx.createOscillator();
+    o.type = "triangle"; o.frequency.value = fr;
+    const g = actx.createGain();
+    o.connect(g); g.connect(masterGain);
+    _env(g, t + i * 0.12, 0.01, 0.3, 0, 0, 0.14);
+    o.start(t + i * 0.12); o.stop(t + i * 0.12 + 0.18);
+  });
+}
+function sfxLaunch() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const nb = actx.createBufferSource();
+  nb.buffer = noiseBuf(1.3);
+  const lp = actx.createBiquadFilter();
+  lp.type = "lowpass"; lp.frequency.value = 700;
+  const g = actx.createGain();
+  nb.connect(lp); lp.connect(g); g.connect(masterGain);
+  _env(g, t, 0.05, 0.45, 0, 0.8, 0.4);
+  nb.start(t); nb.stop(t + 1.3);
+}
+function engineStart() {
+  if (!actx || engineOsc) return;
+  engineOsc = actx.createOscillator();
+  engineOsc.type = "sawtooth";
+  engineOsc.frequency.value = 46;
+  engineFilter = actx.createBiquadFilter();
+  engineFilter.type = "lowpass";
+  engineFilter.frequency.value = 220; engineFilter.Q.value = 1.2;
+  engineGain = actx.createGain();
+  engineGain.gain.value = 0.0001;
+  engineOsc.connect(engineFilter); engineFilter.connect(engineGain);
+  engineGain.connect(masterGain);
+  engineOsc.start();
+}
+function engineUpdate(spd, ab) {
+  if (!engineOsc) return;
+  const t = actx.currentTime;
+  const f = 42 + (spd / 135) * 78 + (ab ? 22 : 0);
+  engineOsc.frequency.setTargetAtTime(f, t, 0.08);
+  engineFilter.frequency.setTargetAtTime(200 + (spd / 135) * 900 + (ab ? 500 : 0), t, 0.1);
+  engineGain.gain.setTargetAtTime(0.03 + (spd / 135) * 0.09 + (ab ? 0.05 : 0), t, 0.1);
+}
+function engineStop() {
+  if (!engineOsc) return;
+  try { engineOsc.stop(); } catch (e) {}
+  try { engineOsc.disconnect(); engineGain.disconnect(); engineFilter.disconnect(); } catch (e) {}
+  engineOsc = engineGain = engineFilter = null;
+}
+
+// ---------- 爆炸特效 ----------
+const _boomFire = new THREE.MeshBasicMaterial({ color: 0xffa63a, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+const _boomFlash = new THREE.MeshBasicMaterial({ color: 0xfff3d0, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+const _boomSmoke = new THREE.MeshLambertMaterial({ color: 0x3a3a3a, transparent: true });
+const _boomRing = new THREE.MeshBasicMaterial({ color: 0xffc46a, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+const _boomDebrisGeo = new THREE.BoxGeometry(0.55, 0.55, 0.55);
+const _boomDebrisMats = [0x2b2b2b, 0x3a3a3a, 0xff7a2a, 0x555a5f].map(c => new THREE.MeshBasicMaterial({ color: c }));
+function boom(pos, big) {
+  const grp = new THREE.Group();
+  // 火球（加法混合，中心亮）
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(big ? 2.6 : 1.5, 10, 8), _boomFire.clone());
+  grp.add(ball);
+  // 白热闪光（快速熄灭）
+  const flash = new THREE.Mesh(new THREE.SphereGeometry(big ? 1.7 : 1.0, 8, 6), _boomFlash.clone());
+  flash.userData.flash = true;
+  grp.add(flash);
+  // 碎片
+  const nd = big ? 12 : 7;
+  for (let i = 0; i < nd; i++) {
+    const d = new THREE.Mesh(_boomDebrisGeo, _boomDebrisMats[(Math.random() * _boomDebrisMats.length) | 0]);
+    d.scale.setScalar(0.5 + Math.random() * (big ? 1.2 : 0.7));
+    const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    const sp = (big ? 34 : 22) * (0.5 + Math.random());
+    d.userData = { vel: dir.multiplyScalar(sp).add(new THREE.Vector3(0, 6, 0)),
+                   spin: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(14) };
+    grp.add(d);
+  }
+  // 烟柱（慢速上升、扩张）
+  const ns = big ? 5 : 3;
+  for (let i = 0; i < ns; i++) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(1.3 + Math.random() * 0.8, 6, 5), _boomSmoke.clone());
+    s.position.set((Math.random() - 0.5) * 3, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 3);
+    s.userData.smoke = true;
+    grp.add(s);
+  }
+  // 冲击波环（水平扩展淡出）
+  if (big) {
+    const ring = new THREE.Mesh(new THREE.RingGeometry(1.5, 3.2, 26), _boomRing.clone());
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.5;
+    ring.userData.ring = true;
+    grp.add(ring);
+  }
+  grp.position.copy(pos);
+  grp.userData.life = big ? 0.95 : 0.6;
+  grp.userData.big = big;
+  scene.add(grp);
+  explosions.push(grp);
+  sfxExplosion(big, pos);
+}
+// 坠机残骸（爆炸后抛射、翻滚、下沉的碎片组）
+const wrecks = [];
+const _wreckGeo = new THREE.BoxGeometry(1.1, 0.55, 0.9);
+const _wreckMats = [0x3a3f45, 0x4a5058, 0x555a5f, 0x2e3238].map(c => new THREE.MeshLambertMaterial({ color: c, flatShading: true }));
+function spawnWreck(pos, quat) {
+  const g = new THREE.Group();
+  const n = 5 + ((Math.random() * 3) | 0);
+  for (let i = 0; i < n; i++) {
+    const m = new THREE.Mesh(_wreckGeo, _wreckMats[(Math.random() * _wreckMats.length) | 0]);
+    m.scale.setScalar(0.6 + Math.random() * 1.1);
+    m.position.set((Math.random() - 0.5) * 3.4, (Math.random() - 0.5) * 2.4, (Math.random() - 0.5) * 3.4);
+    m.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    g.add(m);
+  }
+  const dir = new THREE.Vector3(Math.random() - 0.5, 0.55 + Math.random() * 0.5, Math.random() - 0.5).normalize();
+  g.position.copy(pos);
+  if (quat) g.quaternion.copy(quat);
+  g.userData = { vel: dir.multiplyScalar(26 + Math.random() * 16),
+                 spin: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(5) };
+  scene.add(g);
+  wrecks.push(g);
+}
+function updateWrecks(dt) {
+  for (let i = wrecks.length - 1; i >= 0; i--) {
+    const w = wrecks[i];
+    const u = w.userData;
+    u.vel.y -= 30 * dt; // 重力
+    u.vel.multiplyScalar(Math.max(0, 1 - 0.45 * dt)); // 空气阻力
+    w.position.addScaledVector(u.vel, dt);
+    w.rotation.x += u.spin.x * dt;
+    w.rotation.y += u.spin.y * dt;
+    w.rotation.z += u.spin.z * dt;
+    u.spin.multiplyScalar(Math.max(0, 1 - 0.5 * dt));
+    if (w.position.y < 1) { scene.remove(w); wrecks.splice(i, 1); } // 触海沉没
+  }
+}
+
+// ---------- 补给机 ----------
+let resupply = null;
+function spawnResupply() {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({ color: 0xd8d8c8 });
+  const fus = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 2.5, 28, 10), mat);
+  fus.rotation.x = Math.PI / 2;
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(38, 0.45, 5.5), mat);
+  wing.position.z = 2;
+  const cab = new THREE.Mesh(new THREE.SphereGeometry(0.8, 8, 6),
+    new THREE.MeshLambertMaterial({ color: 0x88c8e8 }));
+  cab.position.set(0, 1.2, -8);
+  g.add(fus, wing, cab);
+  const fx = -Math.sin(P.heading), fz = -Math.cos(P.heading);
+  g.position.set(P.pos.x + fx * 700, Math.max(30, P.pos.y), P.pos.z + fz * 700);
+  g.userData.docked = false;
+  scene.add(g);
+  resupply = g;
+}
+
+// ---------- 玩家状态 ----------
+const P = {
+  pos: new THREE.Vector3(-30, 9, 60),
+  speed: 0, targetSpeed: 40, minSpeed: 28, maxSpeed: 95,
+  afterburn: 0,
+  heading: 0, pitch: 0, roll: 0, bank: 0,
+  alt: 9, hp: 1, score: 0, stage: 1, stageDist: 0, invuln: 0,
+};
+const STAGE_LEN = 2800;
+let missiles = 40;
+
+// ---------- 输入 ----------
+const keys = {};
+let lockTarget = null, cannonCd = 0, demo = false;
+
+// ---------- Demo 模式（既定指令自动演示） ----------
+const DEMO_STEPS = [
+  { dur: 2.0, k: "hold" }, { dur: 1.0, k: "climb" }, { dur: 1.5, k: "hold" },
+  { dur: 2.5, k: "aim" }, { dur: 0.8, k: "turnL" }, { dur: 2.0, k: "aim" },
+  { dur: 0.8, k: "roll" }, { dur: 0.8, k: "ab" }, { dur: 1.5, k: "turnR" },
+  { dur: 2.0, k: "aim" }, { dur: 1.0, k: "dive" },
+  { dur: 1.5, k: "climb" }, { dur: 1.5, k: "turnL" }, { dur: 2.5, k: "aim" },
+  { dur: 1.5, k: "ab" }, { dur: 1.5, k: "turnR" }, { dur: 2.0, k: "aim" },
+  { dur: 1.0, k: "climb" }, { dur: 0.8, k: "roll" }, { dur: 2.5, k: "aim" },
+];
+const demoPlan = { step: 0, t: 0 };
+function demoInput(dt) {
+  demoPlan.t += dt;
+  if (demoPlan.t >= DEMO_STEPS[demoPlan.step].dur) {
+    demoPlan.t = 0;
+    demoPlan.step = (demoPlan.step + 1) % DEMO_STEPS.length;
+  }
+  const inp = { left: false, right: false, up: false, down: false,
+                gun: false, missile: false, afterburn: false, barrel: false };
+  const st = DEMO_STEPS[demoPlan.step];
+  if (st.k === "climb" || st.k === "ab") inp.up = true;
+  if (st.k === "dive") inp.down = true;
+  if (st.k === "turnL") inp.left = true;
+  if (st.k === "turnR") inp.right = true;
+  if (st.k === "roll") inp.barrel = true;
+  if (st.k === "aim") {
+    // 锁定后发射导弹，0.6s 内停枪等导弹命中（原版节奏）
+    if (lockTarget && missiles > 0) {
+      inp.missile = demoPlan.t < 0.6;
+    } else {
+      inp.gun = true; // 没锁定时打机枪
+    }
+  }
+  if (st.k === "ab") inp.afterburn = true;
+  return inp;
+}
+function readInput(dt) {
+  if (demo) return demoInput(dt);
+  return {
+    left: !!keys["ArrowLeft"], right: !!keys["ArrowRight"],
+    up: !!keys["ArrowUp"], down: !!keys["ArrowDown"],
+    gun: !!keys[" "], missile: !!keys["j"],
+    afterburn: !!keys["k"], barrel: !!keys["l"],
+  };
+}
+
+// ---------- HUD / 消息 ----------
+const hudEl = document.getElementById("hud");
+const msgEl = document.getElementById("msg");
+const lockEl = document.getElementById("lockbox");
+let msgTimer = null;
+function flashMsg(text, ms) {
+  msgEl.textContent = text;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => { msgEl.textContent = ""; }, ms);
+}
+
+function resetPlayer() {
+  P.pos.set(-30, 9, 60);
+  P.speed = 0; P.targetSpeed = 40; P.afterburn = 0;
+  P.heading = 0; P.pitch = 0; P.roll = 0; P.bank = 0; P.alt = 9;
+  P.hp = 1; P.score = 0; P.stage = 1; P.stageDist = 0; P.invuln = 0;
+  missiles = 40;
+  lockTarget = null;
+  clearWorld();
+  // 初始敌机
+  const initTypes = ["head", "head", "tail", "flank", "flank"];
+  for (const ty of initTypes) spawnEnemy(ty);
+}
+
+function clearWorld() {
+  for (const arr of [playerBullets, enemyBullets, playerMissiles, enemyMissiles, explosions, wrecks]) {
+    for (const o of arr) scene.remove(o);
+    arr.length = 0;
+  }
+  for (const e of enemies) scene.remove(e);
+  enemies.length = 0;
+  if (resupply) { scene.remove(resupply); resupply = null; }
+}
+
+function setState(s, msgText) {
+  STATE = s;
+  if (msgText !== undefined) msgEl.textContent = msgText;
+}
+
+function onStageAdvance() {
+  P.stage++;
+  sfxStage();
+  const n = 4 + Math.min(4, P.stage);
+  const stageTypes = ["head", "flank", "head", "tail", "flank", "head", "tail", "flank"];
+  for (let i = 0; i < n; i++) spawnEnemy(stageTypes[i % stageTypes.length]);
+  // 新岛屿（玩家前方）
+  const fx = -Math.sin(P.heading), fz = -Math.cos(P.heading);
+  makeIsland(P.pos.x + fx * 1600 + (Math.random() - 0.5) * 600,
+             P.pos.z + fz * 1600 + (Math.random() - 0.5) * 600,
+             350 + Math.random() * 250);
+  // 补给机：每 2 关
+  if (P.stage % 2 === 0 && !resupply) {
+    spawnResupply();
+    flashMsg(`STAGE ${P.stage} — 补给机已就位`, 2200);
+  } else {
+    flashMsg(`STAGE ${P.stage}`, 1200);
+  }
+}
+
+// 持续补充敌机：场上少于 6 架就补（"演员"不断进场）
+let enemyRespawnCd = 0;
+function updateEnemyPopulation(dt) {
+  if (enemies.length >= 6) return;
+  enemyRespawnCd -= dt;
+  if (enemyRespawnCd > 0) return;
+  enemyRespawnCd = 2.5;
+  const types = ["head", "head", "flank", "tail"];
+  spawnEnemy(types[(Math.random() * types.length) | 0]);
+}
+
+// ---------- 锁定判定（相机前方锥形内最近的敌机） ----------
+let prevLock = null;
+function updateLock() {
+  let best = null, bestD = Infinity;
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  for (const e of enemies) {
+    const toE = e.position.clone().sub(camera.position);
+    const dist = toE.length();
+    if (dist > 1100 || dist < 1) continue;
+    const proj = toE.dot(camDir);
+    if (proj < 0) continue;
+    const off = toE.clone().sub(camDir.clone().multiplyScalar(proj)).length();
+    if (off < dist * 0.15 && dist < bestD) { best = e; bestD = dist; }
+  }
+  lockTarget = best;
+  if (best !== prevLock) sfxLock(!!best); // 锁定建立/丢失提示音
+  prevLock = best;
+  lockEl.style.display = best ? "block" : "none";
+}
+
+// ---------- 玩家更新 ----------
+function updatePlayer(dt, inp) {
+  // 速度
+  if (inp.up) P.targetSpeed = Math.min(P.maxSpeed, P.targetSpeed + 30 * dt);
+  if (inp.down) P.targetSpeed = Math.max(P.minSpeed, P.targetSpeed - 36 * dt);
+  if (inp.afterburn) {
+    P.afterburn = Math.min(2.5, P.afterburn + dt);
+    P.targetSpeed = Math.min(135, P.targetSpeed + 65 * dt);
+  }
+  P.afterburn = Math.max(0, P.afterburn - (inp.afterburn ? 0 : 0.4 * dt));
+  P.speed += (P.targetSpeed - P.speed) * Math.min(1, dt * 1.8);
+
+  // 姿态
+  const turnIn = (inp.left ? 1 : 0) - (inp.right ? 1 : 0);
+  P.bank += (turnIn * 0.9 - P.bank) * Math.min(1, dt * 4);
+  P.heading -= P.bank * dt * 1.1;
+  if (inp.barrel) P.roll += dt * 5.2;
+  else P.roll *= Math.pow(0.02, dt);
+  const pitchIn = (inp.up ? 1 : 0) - (inp.down ? 1 : 0);
+  P.pitch += (pitchIn * 0.5 - P.pitch) * Math.min(1, dt * 3);
+  P.pitch = Math.max(-0.85, Math.min(0.85, P.pitch));
+
+  // 位移（3D 速度方向）
+  const fx = -Math.sin(P.heading) * Math.cos(P.pitch);
+  const fy = Math.sin(P.pitch);
+  const fz = -Math.cos(P.heading) * Math.cos(P.pitch);
+  P.pos.x += fx * P.speed * dt;
+  P.pos.y += fy * P.speed * dt;
+  P.pos.z += fz * P.speed * dt;
+  // 高度下限：手动模式 10（可撞山坠毁），Demo 模式 120（AI 高空飞行不触地）
+  const minAlt = demo ? 120 : 10;
+  P.alt = Math.max(minAlt, Math.min(700, P.pos.y));
+  P.pos.y = P.alt;
+  player.position.copy(P.pos);
+
+  // 机体姿态
+  const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), P.heading);
+  const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), P.pitch);
+  const qBank = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -P.bank * 0.55);
+  const qRoll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -P.roll);
+  player.quaternion.copy(qYaw).multiply(qPitch).multiply(qBank).multiply(qRoll);
+
+  // 武器
+  cannonCd = Math.max(0, cannonCd - dt);
+  if (inp.gun && cannonCd <= 0) fireCannon();
+  if (inp.missile) fireMissile();
+
+  updateLock();
+
+  // 关卡
+  P.stageDist += P.speed * dt;
+  if (P.stageDist >= STAGE_LEN) { P.stageDist = 0; onStageAdvance(); }
+
+  P.invuln = Math.max(0, P.invuln - dt);
+}
+
+// ---------- 敌机更新（主动狗斗 AI） ----------
+// 行为规则：
+//   head（攻击手）：从玩家侧前方切入，逼近到 ~60-90 距离咬尾，逼近中持续开火
+//   tail（尾袭手）：咬住玩家尾巴，保持 ~150-220 距离，伺机放导弹
+//   flank（侧翼）：绕到玩家侧前方 90° 位置，逼近到 ~100 距离开火
+function updateEnemies(dt) {
+  const pFwd = new THREE.Vector3(
+    -Math.sin(P.heading) * Math.cos(P.pitch),
+    Math.sin(P.pitch),
+    -Math.cos(P.heading) * Math.cos(P.pitch));
+  const pRight = new THREE.Vector3(-Math.cos(P.heading), 0, Math.sin(P.heading));
+  const pSpeed = P.speed;
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    const type = e.userData.type;
+    const toP = P.pos.clone().sub(e.position);
+    const dist = toP.length();
+    if (dist < 0.1) continue;
+
+    // --- 目标点 + 期望速度（按角色） ---
+    let target, expSpd, minR;
+    if (type === "head") {
+      // 攻击手：切到玩家正前方 70，咬尾攻击
+      target = P.pos.clone().addScaledVector(pFwd, 70);
+      // 切入：还没到前方攻击位就横切，到了就贴住
+      const relFwd = toP.dot(pFwd);
+      if (relFwd > 150) { // 还在玩家侧后方/侧面 → 横切到前方
+        const sd = (e.userData.weave > 0 ? 1 : -1);
+        target = P.pos.clone().addScaledVector(pFwd, 120).addScaledVector(pRight, sd * 60);
+        expSpd = Math.min(105, pSpeed + 18);
+      } else {
+        expSpd = Math.min(95, pSpeed + 4); // 咬尾速度略快于玩家
+      }
+      minR = 55;
+    } else if (type === "tail") {
+      // 尾袭手：咬尾巴 170 距离
+      target = P.pos.clone().addScaledVector(pFwd, -170);
+      expSpd = Math.min(95, pSpeed + 2);
+      minR = 130;
+    } else {
+      // 侧翼：玩家侧前方 90°，距离 110
+      const sd = (e.userData.weave > 0 ? 1 : -1);
+      target = P.pos.clone().addScaledVector(pFwd, 30).addScaledVector(pRight, sd * 110);
+      expSpd = Math.min(100, pSpeed + 10);
+      minR = 85;
+    }
+    target.y = Math.max(18, target.y);
+
+    // --- 朝目标点机动：以期望速度朝目标飞，近距时侧向绕圈保持攻击位 ---
+    const toT = target.clone().sub(e.position);
+    const dT = toT.length();
+    let move;
+    if (dT < minR) {
+      // 贴住攻击位：侧向绕圈 + 跟随玩家
+      const perp = new THREE.Vector3(-toT.z, 0, toT.x).normalize();
+      move = perp.multiplyScalar(34 * dt * (e.userData.weave > 0 ? 1 : -1));
+      move.addScaledVector(pFwd, pSpeed * 0.6 * dt); // 跟随玩家前进
+    } else {
+      move = toT.normalize().multiplyScalar(Math.min(expSpd, dT / Math.max(dt, 0.001)) * dt);
+    }
+    e.position.add(move);
+    e.position.y = Math.max(15, Math.min(500, e.position.y));
+    e.lookAt(target);
+
+    // --- 武器 ---
+    e.userData.firing -= dt;
+    const aimOk = type === "tail" ? (dist > 130 && dist < 750) : (dist < 260);
+    if (aimOk && e.userData.firing <= 0) {
+      e.userData.firing = type === "head" ? 0.35 : 0.5;
+      const b = new THREE.Mesh(new THREE.SphereGeometry(0.45, 5, 4), eBulletMat);
+      b.position.copy(e.position);
+      // 预判：朝玩家位置 + 玩家速度方向的前伸量射击
+      const pVelDir = pFwd.clone().multiplyScalar(pSpeed);
+      const lead = toP.clone().normalize().multiplyScalar(pSpeed * Math.min(0.6, dist / 300));
+      b.userData = { vel: (P.pos.clone().add(lead).sub(e.position)).normalize().multiplyScalar(100), life: 2.2 };
+      scene.add(b);
+      enemyBullets.push(b);
+    }
+    if (type === "tail") {
+      e.userData.missileCd -= dt;
+      if (e.userData.missileCd <= 0 && dist > 130 && dist < 750) {
+        spawnEnemyMissile(e);
+        e.userData.missileCd = 4 + Math.random() * 3;
+      }
+    }
+
+    // --- 撞机（与玩家同归于尽） ---
+    if (dist < 11 && P.invuln <= 0) {
+      const mid = e.position.clone().addScaledVector(toP, 0.5);
+      boom(mid, true);
+      spawnWreck(mid, e.quaternion);
+      boom(P.pos, true);
+      spawnWreck(P.pos, player.quaternion);
+      P.score += 500 * P.stage; // 撞死也算击落
+      scene.remove(e);
+      enemies.splice(i, 1);
+      if (lockTarget === e) lockTarget = null;
+      playerHit();
+      continue;
+    }
+
+    // --- 被击落 ---
+    if (e.userData.hp <= 0) {
+      boom(e.position, true);
+      spawnWreck(e.position, e.quaternion);
+      P.score += 500 * P.stage;
+      scene.remove(e);
+      enemies.splice(i, 1);
+      if (lockTarget === e) lockTarget = null;
+      continue;
+    }
+    // 出界回收（只回收，不加分）
+    if (dist > 3200) { scene.remove(e); enemies.splice(i, 1); }
+  }
+}
+
+// ---------- 子弹/导弹更新 ----------
+function updateBullets(dt) {
+  for (let i = playerBullets.length - 1; i >= 0; i--) {
+    const b = playerBullets[i];
+    b.position.addScaledVector(b.userData.vel, dt);
+    b.userData.life -= dt;
+    let dead = b.userData.life <= 0;
+    if (!dead) {
+      for (const e of enemies) {
+        if (b.position.distanceTo(e.position) < 8) {
+          e.userData.hp -= 1;
+          P.score += 50;
+          boom(b.position, false);
+          dead = true;
+          break;
+        }
+      }
+    }
+    if (dead) { scene.remove(b); playerBullets.splice(i, 1); }
+  }
+  for (let i = enemyBullets.length - 1; i >= 0; i--) {
+    const b = enemyBullets[i];
+    b.position.addScaledVector(b.userData.vel, dt);
+    b.userData.life -= dt;
+    let dead = b.userData.life <= 0;
+    if (!dead && b.position.distanceTo(P.pos) < 7 && P.invuln <= 0) {
+      dead = true;
+      playerHit();
+    }
+    if (dead) { scene.remove(b); enemyBullets.splice(i, 1); }
+  }
+}
+
+function updateMissiles(dt) {
+  for (let i = playerMissiles.length - 1; i >= 0; i--) {
+    const m = playerMissiles[i];
+    const u = m.userData;
+    u.life -= dt;
+    if (u.target && enemies.includes(u.target)) {
+      const toT = u.target.position.clone().sub(m.position).normalize();
+      u.vel.lerp(toT.multiplyScalar(135), Math.min(1, u.turn * dt));
+      m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), u.vel.clone().normalize());
+    }
+    m.position.addScaledVector(u.vel, dt);
+    let dead = u.life <= 0;
+    if (!dead && u.target && enemies.includes(u.target) && m.position.distanceTo(u.target.position) < 9) {
+      u.target.userData.hp -= 1;
+      P.score += 300;
+      boom(m.position, true);
+      if (u.target === lockTarget) lockTarget = null;
+      dead = true;
+    }
+    if (dead) { scene.remove(m); playerMissiles.splice(i, 1); }
+  }
+  for (let i = enemyMissiles.length - 1; i >= 0; i--) {
+    const m = enemyMissiles[i];
+    const u = m.userData;
+    u.life -= dt;
+    const toP = P.pos.clone().sub(m.position);
+    const dist = toP.length();
+    // 原版精髓：敌弹锁定玩家，改变速度/桶滚可甩脱
+    const speedDelta = Math.abs(P.speed - 55);
+    u.lock = Math.max(0, Math.min(1, u.lock + (dist < 420 ? dt * 0.8 : -dt * 0.3)));
+    if (speedDelta > 25 || Math.abs(P.roll) > 0.6) u.lock = Math.max(0, u.lock - dt * 1.6);
+    u.vel.lerp(toP.clone().normalize().multiplyScalar(85), Math.min(1, u.lock * dt * 2));
+    m.position.addScaledVector(u.vel, dt);
+    let dead = u.life <= 0;
+    if (!dead && dist < 8 && P.invuln <= 0) {
+      dead = true;
+      playerHit();
+    }
+    if (dead) { scene.remove(m); enemyMissiles.splice(i, 1); }
+  }
+}
+
+function playerHit(cause) {
+  if (P.invuln > 0) return;
+  boom(P.pos, true);
+  spawnWreck(P.pos, player.quaternion);
+  if (demo) {
+    // Demo 模式不结束：原地满血复活继续演示（不重置敌机/关卡/分数）
+    P.hp = 1;
+    P.pos.y = Math.max(60, P.pos.y);
+    P.pitch = 0; P.roll = 0;
+    P.invuln = 2; // 2 秒无敌，给 AI 喘息
+    return;
+  }
+  P.hp = 0;
+  P.invuln = 0.8;
+  const reason = cause === "terrain" ? "（撞山）" : "";
+  setState("GAMEOVER", `GAME OVER${reason}\n按 ENTER 重新开始`);
+}
+
+// 地形碰撞检测：玩家进入岛屿地面/山峰 → 坠毁
+function checkTerrainCollision() {
+  for (const isl of islands) {
+    const dx = P.pos.x - isl.cx, dz = P.pos.z - isl.cz;
+    const d2 = dx * dx + dz * dz;
+    // 岛屿地面（半径 size，顶面 y=7）
+    if (d2 < isl.size * isl.size && P.pos.y < isl.groundY + 3) {
+      playerHit("terrain");
+      return;
+    }
+    // 山峰（圆锥近似：水平距 < r 且高度在山顶下方）
+    for (const pk of isl.peaks) {
+      const px = P.pos.x - pk.x, pz = P.pos.z - pk.z;
+      if (px * px + pz * pz < pk.r * pk.r &&
+          P.pos.y < pk.y + pk.h * 0.5 && P.pos.y > 5) {
+        playerHit("terrain");
+        return;
+      }
+    }
+  }
+}
+
+// ---------- 补给机更新 ----------
+function updateResupply(dt) {
+  if (!resupply) return;
+  const u = resupply.userData;
+  if (!u.docked) {
+    const toP = P.pos.clone().sub(resupply.position);
+    const d = toP.length();
+    if (d > 95) {
+      resupply.position.addScaledVector(toP.normalize(), 28 * dt);
+      resupply.lookAt(P.pos);
+    } else {
+      u.docked = true;
+      missiles = Math.min(99, missiles + 50);
+      P.score += 1000;
+      sfxResupply();
+      flashMsg("RESUPPLY +50 MISSILES", 2000);
+      u.fade = 1.6;
+    }
+  } else {
+    u.fade -= dt;
+    resupply.children.forEach(c => { if (c.material) { c.material.transparent = true; c.material.opacity = Math.max(0, u.fade / 1.6); } });
+    resupply.position.y += 7 * dt;
+    if (u.fade <= 0) { scene.remove(resupply); resupply = null; }
+  }
+}
+
+// ---------- 爆炸更新 ----------
+function updateExplosions(dt) {
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    const g = explosions[i];
+    const u = g.userData;
+    u.life -= dt;
+    const life0 = u.big ? 0.95 : 0.6;
+    const t01 = Math.max(0, Math.min(1, u.life / life0)); // 1→0
+    for (const c of g.children) {
+      if (c.userData.flash) {
+        c.visible = u.life > (life0 - 0.14); // 白热闪光仅前 0.14s
+        if (c.visible) {
+          c.scale.setScalar(1 + (1 - t01) * 3);
+          c.material.opacity = Math.max(0, Math.min(1, (u.life - (life0 - 0.14)) / 0.14));
+        }
+      } else if (c.userData.smoke) {
+        c.position.y += (2.5 + Math.random() * 1.5) * dt; // 上升
+        c.scale.multiplyScalar(1 + dt * 1.6);             // 扩散
+        c.material.opacity = Math.max(0, t01 * 0.62);
+      } else if (c.userData.ring) {
+        c.scale.setScalar(1 + (1 - t01) * 13);            // 冲击波扩展
+        c.material.opacity = Math.max(0, t01 * 0.8);
+      } else if (c.userData.vel) {
+        // 碎片：惯性 + 重力 + 翻滚
+        c.userData.vel.y -= 34 * dt;
+        c.position.addScaledVector(c.userData.vel, dt);
+        c.rotation.x += c.userData.spin.x * dt;
+        c.rotation.y += c.userData.spin.y * dt;
+        c.rotation.z += c.userData.spin.z * dt;
+        c.material.opacity = Math.max(0, Math.min(1, t01 * 1.5));
+      } else {
+        // 火球
+        c.scale.setScalar(0.6 + (1 - t01) * (u.big ? 3.2 : 2.0));
+        c.material.opacity = Math.max(0, t01 * 0.95);
+      }
+    }
+    if (u.life <= 0) { scene.remove(g); explosions.splice(i, 1); }
+  }
+}
+
+// ---------- 岛屿回收 ----------
+let islandAcc = 0;
+function updateIslands(dt) {
+  islandAcc += P.speed * dt;
+  if (islandAcc > 2400) {
+    islandAcc = 0;
+    // 回收最远的岛
+    if (islands.length > 10) {
+      let farIdx = 0, farD = -1;
+      islands.forEach((isl, idx) => {
+        const d = (isl.cx - P.pos.x) ** 2 + (isl.cz - P.pos.z) ** 2;
+        if (d > farD) { farD = d; farIdx = idx; }
+      });
+      scene.remove(islands[farIdx].g);
+      islands.splice(farIdx, 1);
+    }
+    // 前方补新岛
+    const fx = -Math.sin(P.heading), fz = -Math.cos(P.heading);
+    makeIsland(P.pos.x + fx * 2200 + (Math.random() - 0.5) * 900,
+               P.pos.z + fz * 2200 + (Math.random() - 0.5) * 900,
+               320 + Math.random() * 280);
+  }
+}
+
+// ---------- 云漂移 ----------
+function updateClouds(dt) {
+  for (const c of clouds) {
+    c.position.x += 4 * dt;
+    if (c.position.distanceTo(camera.position) > 4200) {
+      c.position.set(camera.position.x + (Math.random() - 0.5) * 3600,
+                     260 + Math.random() * 220,
+                     camera.position.z + (Math.random() - 0.5) * 3600);
+    }
+  }
+}
+
+// ---------- 相机 ----------
+function updateCamera(dt) {
+  const up = new THREE.Vector3(0, 1, 0);
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(player.quaternion);
+  const dist = 26 + Math.max(0, (P.speed - 60) * 0.15) + (P.afterburn > 0 ? 8 : 0);
+  const height = 10 + dist * 0.3;
+  camPos.copy(player.position)
+    .addScaledVector(fwd, -dist)
+    .addScaledVector(up, height)
+    .addScaledVector(right, P.bank * 4);
+  camera.position.lerp(camPos, Math.min(1, dt * 5));
+  camLook.copy(player.position).addScaledVector(fwd, 24);
+  camera.lookAt(camLook);
+  sky.position.copy(camera.position);
+  sunMesh.position.copy(camera.position).addScaledVector(sunDir, 6000);
+  sunGlow.position.copy(sunMesh.position);
+  camera.fov = 64 + (P.afterburn > 0 ? 5 : 0);
+  camera.updateProjectionMatrix();
+}
+const camPos = new THREE.Vector3();
+const camLook = new THREE.Vector3();
+
+// ---------- HUD ----------
+function renderHUD() {
+  const ab = P.afterburn > 0;
+  // 速度条
+  const spdPct = Math.max(0, Math.min(1, (P.speed - P.minSpeed) / (135 - P.minSpeed)));
+  const barLen = 20;
+  let bar = "[";
+  for (let i = 0; i < barLen; i++) bar += (i / barLen < spdPct) ? (ab ? "#" : "=") : " ";
+  bar += "]";
+  let s = ` SCORE  ${String(P.score).padStart(7, " ")}   STAGE ${P.stage}\n`;
+  s += ` SPD ${bar} ${P.speed.toFixed(0)}${ab ? " AB" : "   "}\n`;
+  s += ` MSL  ${String(missiles).padStart(2, " ")}      ALT ${P.alt.toFixed(0).padStart(3, " ")} m`;
+  if (lockTarget) s += `\n  > LOCK ON <`;
+  hudEl.textContent = s;
+}
+
+// ---------- 主循环 ----------
+let lastT = performance.now();
+let elapsed = 0;
+function frame() {
+  requestAnimationFrame(frame);
+  const now = performance.now();
+  let dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+  elapsed += dt;
+
+  if (STATE === "PLAYING") {
+    const inp = readInput(dt);
+    updatePlayer(dt, inp);
+    if (STATE === "GAMEOVER") {
+      // 本帧被击落：停止后续更新
+      updateEngineFlames(dt);
+      renderer.render(scene, camera);
+      return;
+    }
+    updateEnemies(dt);
+    if (STATE === "GAMEOVER") {
+      updateEngineFlames(dt);
+      renderer.render(scene, camera);
+      return;
+    }
+    checkTerrainCollision();
+    if (STATE === "GAMEOVER") {
+      updateEngineFlames(dt);
+      renderer.render(scene, camera);
+      return;
+    }
+    updateEnemyPopulation(dt);
+    updateBullets(dt);
+    updateMissiles(dt);
+    updateResupply(dt);
+    updateExplosions(dt);
+    updateWrecks(dt);
+    updateIslands(dt);
+    updateClouds(dt);
+    updateEngineFlames(dt);
+    engineUpdate(P.speed, P.afterburn > 0);
+    updateCamera(dt);
+    renderHUD();
+  } else if (STATE === "TAKEOFF") {
+    // 弹射起飞：固定强输入（油门+加力），沿航母甲板方向加速
+    // （油门与俯仰共用 ↑ 键，起飞阶段不读输入，避免误拉起）
+    const inp = { left: false, right: false, up: true, down: false,
+                 gun: false, missile: false, afterburn: true, barrel: false };
+    updatePlayer(dt, inp);
+    updateClouds(dt);
+    updateEngineFlames(dt);
+    engineUpdate(P.speed, P.afterburn > 0);
+    updateCamera(dt);
+    renderHUD();
+    // 起飞判定：相对航母的位置向量沿 -Z 分量 < -80（不依赖玩家航向）
+    const dz = P.pos.z - carrier.position.z;
+    const dx = P.pos.x - carrier.position.x;
+    if (dz < -80 && Math.abs(dx) < 120) {
+      P.pitch = Math.max(P.pitch, 0.15); // 离舰瞬间小幅拉起
+      engineStart();
+      sfxLaunch();
+      setState("PLAYING", demo ? "DEMO — 自动演示中" : "LAUNCH — 加油，飞行员！");
+      flashMsg(msgEl.textContent, 1500);
+    }
+  } else if (STATE === "TITLE" || STATE === "GAMEOVER") {
+    // 背景展示：相机缓慢环绕（不动玩家位置，保证 Enter 起飞逻辑干净）
+    P.heading += dt * 0.02;
+    P.pos.y = 34 + Math.sin(elapsed * 0.3) * 3;
+    player.position.copy(P.pos);
+    player.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), P.heading)
+      .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.05));
+    updateClouds(dt);
+    updateEngineFlames(dt);
+    updateCamera(dt);
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ---------- 事件 ----------
+// 点击窗口任意处获得键盘焦点（内嵌浏览器里焦点可能不在页面上）；同时解锁音频
+window.addEventListener("click", () => { window.focus(); audioInit(); audioResume(); });
+window.addEventListener("keydown", (ev) => {
+  const k = ev.key;
+  if ([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(k)) ev.preventDefault();
+  keys[k] = true;
+  audioInit(); audioResume();
+  if (k === "Enter") {
+    if (STATE === "TITLE" || STATE === "GAMEOVER") {
+      resetPlayer();
+      demoPlan.step = 0; demoPlan.t = 0;
+      setState("TAKEOFF", "弹射起飞…");
+    }
+  }
+  if (k === "m") {
+    demo = !demo;
+    demoPlan.step = 0; demoPlan.t = 0;
+    if (demo) {
+      // 无论当前什么状态，都重置一局全新演示（TITLE 起飞 / PLAYING 重开）
+      resetPlayer();
+      setState("TAKEOFF", "DEMO — 自动演示");
+    }
+    flashMsg(demo ? "DEMO MODE ON" : "DEMO MODE OFF", 1200);
+  }
+});
+window.addEventListener("keyup", (ev) => { keys[ev.key] = false; });
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---------- 启动 ----------
+setState("TITLE", "SKY STRIKER 3D\n\nENTER 起飞    M 演示模式\n\n↑↓ 油门/俯仰  ←→ 转向  空格 机枪\nJ 导弹(需锁定)  K 加力  L 桶滚");
+player.position.set(0, 34, 130);
+player.rotation.y = 0.35;
+frame();
+</script>
+</body>
+</html>

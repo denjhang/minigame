@@ -1,0 +1,38 @@
+.info {
+    left: 8px;
+    bottom: 8px;
+    display: flex;
+    justify-content: center;
+    flex-direction: column;
+
+    p {
+        margin: 0;
+        transition: 0.6s;
+    }
+
+    a {
+        color: #747bff;
+    }
+
+    .icon {
+        position: absolute;
+        left: 14px;
+        top: 2px;
+        font-size: 24px;
+        font-weight: 900;
+        transition: 0.2s;
+        opacity: 1;
+    }
+
+    &.open {
+        height: 120px;
+
+        @media screen and (max-width: 500px) {
+            width: calc(100% - 70px);
+        }
+
+        .icon {
+            transform: scale(0);
+        }
+    }
+}
